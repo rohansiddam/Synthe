@@ -5,7 +5,7 @@ receiver runs. Bad handoffs get rejected with a reason, not silently executed.
 
 ## Layout
 
-- `HANDOFF_CONTRACT_V0.1.md` — the one-page spec
+- `SPEC.md` — the one-page spec
 - `schema/handoff.schema.json` — JSON Schema for the packet
 - `src/handoff_check.py` — stdlib-only CLI validator (no dependencies)
 - `examples/` — a valid packet, five rejected packets, an agent registry, a sample artifact
@@ -22,6 +22,18 @@ python3 src/handoff_check.py examples/bad-paraphrase-evidence.json \
   --registry examples/registry.json --workspace . --dry-run
 # REJECT invalid: evidence_not_verbatim
 ```
+
+## Use it on your own handoff
+
+1. Write a packet like `examples/valid.json` for the work being handed over (fields are defined in `schema/handoff.schema.json`).
+2. Register your agents in a registry file (see `examples/registry.json`).
+3. Validate before the receiving agent runs:
+
+```bash
+python3 src/handoff_check.py your-handoff.json --registry your-agents.json --workspace . --ledger ledger.json
+```
+
+Or as a GitHub Action: `uses: rohansiddam/Synthe/github-action@main` (see `github-action/README.md`). Agents: `AGENTS.md` explains all of this in agent-readable form.
 
 Exit code 0 = ACCEPT, 2 = REJECT with a failure state and reason codes.
 
