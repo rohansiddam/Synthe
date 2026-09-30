@@ -1,0 +1,10 @@
+Handoff Contract v0.1 — Evaluation License
+Copyright (c) 2026 Cadros. All rights reserved.
+
+This package is provided for EVALUATION ONLY. You may copy and run it to
+test the Handoff Contract validator on your own agent workflows. You may
+not redistribute it, publish forks, or incorporate it into a product or
+service without written permission.
+
+This is pre-release software shared with a small group of testers. It
+comes with no warranty of any kind.
