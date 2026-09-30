@@ -3,7 +3,7 @@ description: >-
   Validate an agent-to-agent handoff packet (Handoff Contract v0.1) before a
   receiving agent starts work. Fails the step when the handoff is rejected
   (stale, incomplete, blocked, duplicate, ...) and prints the reason.
-author: 'Cadros'
+author: 'Synthe'
 branding:
   icon: 'shield'
   color: 'blue'
