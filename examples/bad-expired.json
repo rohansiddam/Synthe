@@ -1,0 +1,75 @@
+{
+  "handoff": {
+    "acceptance": {
+      "evidence": [
+        {
+          "kind": "verbatim_quote",
+          "ref": "rules/M-1.md#m1-u-12",
+          "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0",
+          "verbatim": true
+        },
+        {
+          "kind": "test_output",
+          "ref": "runs/2026-09-30/tests.txt"
+        }
+      ],
+      "expires_at": "2020-01-01T00:00:00Z",
+      "output_schema": "verdict_pack.v1",
+      "required_evidence": [
+        "verbatim_quote",
+        "test_output"
+      ]
+    },
+    "authority": {
+      "allowed_tools": [
+        "read_repo",
+        "run_tests"
+      ],
+      "approval_required_for": [
+        "send_email"
+      ],
+      "approvals": [],
+      "budget": {
+        "minutes": 30,
+        "tokens": 50000,
+        "usd": 2.0
+      }
+    },
+    "from": "cora",
+    "id": "h-0001",
+    "idempotency_key": "cadros:verdict-pack:m1-os-pl:rev-7",
+    "inputs": {
+      "artifact_refs": [
+        {
+          "path": "examples/artifact.txt",
+          "sha256": "3cfde1592d02ef2d68a84d9b2b0fd58f0ca3f4576703facf772f9c6893b72c44"
+        }
+      ],
+      "state_revision": "rev-42"
+    },
+    "on_failure": "reject",
+    "planned_actions": [
+      {
+        "est_minutes": 10,
+        "est_tokens": 5000,
+        "est_usd": 0.2,
+        "name": "read_rules",
+        "tool": "read_repo"
+      }
+    ],
+    "purpose": "Verify the M-1/OS/PL verdict pack before it enters the rules store",
+    "schema_version": "0.1",
+    "scope": {
+      "forbidden": [
+        "send_email",
+        "publish",
+        "delete"
+      ],
+      "owned_paths": [
+        "rules/**"
+      ]
+    },
+    "to": "caddy",
+    "trace_id": "trace-cadros-2026-09-30-001"
+  }
+}
