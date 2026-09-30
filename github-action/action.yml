@@ -1,0 +1,43 @@
+name: 'Handoff Contract Check'
+description: >-
+  Validate an agent-to-agent handoff packet (Handoff Contract v0.1) before a
+  receiving agent starts work. Fails the step when the handoff is rejected
+  (stale, incomplete, blocked, duplicate, ...) and prints the reason.
+author: 'Cadros'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  packet:
+    description: 'Path to the handoff packet JSON (e.g. handoff.json committed in the PR).'
+    required: true
+  registry:
+    description: 'Path to the agent registry JSON (canonical agent ids + aliases). Optional but recommended.'
+    required: false
+    default: ''
+  ledger:
+    description: 'Path to an idempotency ledger JSON for duplicate-handoff detection. Optional.'
+    required: false
+    default: ''
+  workspace:
+    description: 'Workspace root used to check that referenced artifacts exist and match their hashes.'
+    required: false
+    default: '.'
+
+outputs:
+  decision:
+    description: 'ACCEPT or REJECT'
+    value: ${{ steps.check.outputs.decision }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      env:
+        HANDOFF_PACKET: ${{ inputs.packet }}
+        HANDOFF_REGISTRY: ${{ inputs.registry }}
+        HANDOFF_LEDGER: ${{ inputs.ledger }}
+        HANDOFF_WORKSPACE: ${{ inputs.workspace }}
+      run: '"${{ github.action_path }}/checker/run_check.sh"'
