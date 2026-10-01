@@ -25,12 +25,61 @@ the validator confirms, before the receiver starts work:
   SHA-256 hash (no stale files);
 - all required evidence is attached, and evidence that must be verbatim
   (quotes, code, legal text) is flagged as verbatim, not paraphrased;
-- optionally, with a ledger: the handoff's idempotency key has not already
-  been executed (no duplicate work).
+- duplicate protection via the idempotency ledger: the handoff's key has
+  not already been claimed or executed (see "Duplicate protection & the
+  ledger" below — the Action persists the ledger across runs for you).
 
 Exit code `0` = ACCEPT. Any rejection exits `1` and prints the failure state
-(`stale`, `incomplete`, `blocked`, `invalid`, `duplicate`, ...) with a
-human-readable reason in the step log and as a workflow error annotation.
+(`stale`, `incomplete`, `blocked`, `invalid`, `duplicate`, `unknown`, ...)
+with a human-readable reason in the step log and as a workflow error
+annotation.
+
+## Duplicate protection & the ledger (v0.2)
+
+Duplicate detection needs memory: which idempotency keys have already been
+claimed. That memory lives in a JSON **ledger**. This matters because
+GitHub-hosted runners are **ephemeral**: each job runs on a fresh machine
+and the workspace is discarded afterwards. A ledger left as a plain file in
+the repo workspace would silently vanish between runs, and with it all
+duplicate protection.
+
+So when you don't pass the `ledger` input, the Action manages one at
+`.synthe/ledger.json` for you:
+
+1. `actions/cache/restore` restores it before the check (key
+   `synthe-ledger-<owner>/<repo>`, prefix fallback to the newest entry).
+2. The checker validates against it and records claims in it.
+3. `actions/cache/save` writes it back **even if the check failed**
+   (`if: always()`), under a per-run key.
+
+Claims are a two-step state machine, not a single "seen it" flag:
+
+- **ACCEPT** records the key as `RESERVED` (atomically, under a file lock,
+  so two simultaneous presentations can't both pass). This is only a claim:
+  the effect has not happened yet.
+- After the receiving agent actually performs the work, mark the claim
+  complete:
+
+  ```bash
+  python3 checker/handoff_check.py handoff.json \
+    --ledger .synthe/ledger.json --complete
+  ```
+
+- Re-presenting a `COMPLETED` key is rejected as `duplicate`. Re-presenting
+  a `RESERVED` key within 24 hours (`--reserve-ttl-hours`) is also
+  `duplicate` ("claimed by handoff X; reconcile before redispatch"). A
+  `RESERVED` claim older than the TTL flips to the failure state `unknown`:
+  the receiver may have crashed before *or after* the effect, so reconcile
+  against the receiver's effect receipt before redispatching.
+
+If you pass your own `ledger` path, the cache steps are skipped and
+persisting that file between runs is up to you (e.g. commit it back, or use
+your own cache step).
+
+Caveat: the GitHub cache is per-repository and best-effort (entries can be
+evicted, and caches don't cross forks). For high-stakes effects, treat the
+ledger as one layer and keep the receiver's own effect receipt as the
+source of truth for reconciliation.
 
 ## Usage
 
@@ -95,7 +144,7 @@ Adjust the path to wherever `action.yml` sits in that repo.
 |-------------|----------|---------|-------------|
 | `packet`    | yes      | —       | Path to the handoff packet JSON. |
 | `registry`  | no       | —       | Path to the agent registry JSON (canonical ids + aliases). Without it, identity checks are skipped. |
-| `ledger`    | no       | —       | Path to an idempotency ledger JSON for duplicate detection. Without it, duplicate checks are skipped. |
+| `ledger`    | no       | *(managed)* | Path to an idempotency ledger JSON for duplicate detection. Leave unset and the Action persists `.synthe/ledger.json` across runs via `actions/cache` (see "Duplicate protection & the ledger"). Set it only if you manage that file's persistence yourself. |
 | `workspace` | no       | `.`     | Root for artifact existence/hash checks. |
 
 ## Output

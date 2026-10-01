@@ -17,7 +17,16 @@ inputs:
     required: false
     default: ''
   ledger:
-    description: 'Path to an idempotency ledger JSON for duplicate-handoff detection. Optional.'
+    description: >-
+      Path to an idempotency ledger JSON for duplicate-handoff detection.
+      Leave empty to use the Action-managed ledger at .synthe/ledger.json:
+      on GitHub-hosted runners the workspace is thrown away after every run,
+      so a plain ledger file would silently lose duplicate protection. The
+      Action restores .synthe/ledger.json from actions/cache before the
+      check and saves it back afterwards (even when the check fails), which
+      gives the claim ledger cross-run durability. If you set this input,
+      you manage that file's persistence yourself and the cache steps are
+      skipped.
     required: false
     default: ''
   workspace:
@@ -33,11 +42,35 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # Durability for the claim ledger: hosted runners are ephemeral, so the
+    # ledger is restored from cache before the check and saved back after,
+    # even on failure. Only when the caller did not supply their own ledger
+    # path (in that case persistence is theirs to manage).
+    - name: Restore handoff ledger
+      if: inputs.ledger == ''
+      uses: actions/cache/restore@v4
+      with:
+        path: .synthe/ledger.json
+        key: synthe-ledger-${{ github.repository }}
+        restore-keys: |
+          synthe-ledger-${{ github.repository }}
     - id: check
       shell: bash
       env:
         HANDOFF_PACKET: ${{ inputs.packet }}
         HANDOFF_REGISTRY: ${{ inputs.registry }}
-        HANDOFF_LEDGER: ${{ inputs.ledger }}
+        HANDOFF_LEDGER: ${{ inputs.ledger != '' && inputs.ledger || '.synthe/ledger.json' }}
         HANDOFF_WORKSPACE: ${{ inputs.workspace }}
       run: '"${{ github.action_path }}/checker/run_check.sh"'
+    - name: Ensure handoff ledger file exists
+      if: always() && inputs.ledger == ''
+      shell: bash
+      run: |
+        mkdir -p .synthe
+        [ -f .synthe/ledger.json ] || echo '{}' > .synthe/ledger.json
+    - name: Save handoff ledger
+      if: always() && inputs.ledger == ''
+      uses: actions/cache/save@v4
+      with:
+        path: .synthe/ledger.json
+        key: synthe-ledger-${{ github.repository }}-${{ github.run_id }}
