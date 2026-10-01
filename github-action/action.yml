@@ -87,9 +87,9 @@ runs:
         HANDOFF_PHASE: ${{ inputs.phase }}
       run: |
         if [ "$HANDOFF_PHASE" = "complete" ]; then
-          "${{ github.action_path }}/checker/run_complete.sh"
+          bash "${{ github.action_path }}/checker/run_complete.sh"
         else
-          "${{ github.action_path }}/checker/run_check.sh"
+          bash "${{ github.action_path }}/checker/run_check.sh"
         fi
     # A claim phase must persist the ledger even when the check REJECTED:
     # rejections are also recorded state (a failed claim attempt must not
