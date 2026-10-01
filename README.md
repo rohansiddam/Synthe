@@ -1,7 +1,8 @@
-# Handoff Contract v0.1 — verification layer
+# Synthe
 
-A tiny checker that validates an agent-to-agent handoff packet **before** the
-receiver runs. Bad handoffs get rejected with a reason, not silently executed.
+Synthe checks every handoff between AI agents before the receiving agent acts on it.
+
+Most agent-to-agent handoffs today are blobs of text that the receiving agent takes on trust. That is how the same work gets done twice, stale artifacts get acted on, and actions nobody approved slip through. Synthe puts a gate in the middle: every handoff arrives as a typed packet, gets validated against a registry and the actual artifacts it points to, and gets an ACCEPT or a REJECT with a reason. Every accepted handoff is recorded, so the same one cannot be claimed twice.
 
 ## Layout
 
