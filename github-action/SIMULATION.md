@@ -83,3 +83,40 @@ All three runs behave as a CI gate should: the valid handoff passes, both
 broken handoffs fail with the reason printed in the log and surfaced as an
 `::error::` annotation. Note: the raw checker exits `2` on reject; the
 action's entrypoint normalizes any rejection to exit `1`.
+
+## Two-runner simulation (2026-09-30, Option 2)
+
+`simulate_two_runners.py` (this folder) models the cross-run behavior the
+single-run runs above cannot reach: each "runner" is an isolated temp
+workspace running the real, unmodified checker; the ledger moves between
+runners only via an explicit cache hand-off. **This is a local model of
+hosted runners, not a GitHub run** — it does not model cache eviction,
+queueing, or clock skew. Recorded output (`--mode all`, exit 0):
+
+```
+=== MODE: legacy (v0.2 action: independent runners, same empty cache) ===
+runner A: ACCEPT  (ledger: RESERVED)
+runner B: ACCEPT  (ledger: RESERVED)
+EXPECTED (the bug): both ACCEPT -> REPRODUCED
+
+=== MODE: fixed (concurrency group serializes runs; cache chaining) ===
+runner A claim : ACCEPT  (ledger: RESERVED)
+cache hand-off A->B: snapshot restored
+runner B claim : REJECT [duplicate: idempotency_key_reserved]  (ledger: RESERVED)
+EXPECTED: exactly one ACCEPT, B REJECT duplicate -> HOLDS
+
+=== MODE: complete (claim, then complete step, then replay) ===
+runner A claim : ACCEPT  (ledger: RESERVED)
+cache hand-off A->B: snapshot restored
+runner B claim : REJECT [duplicate: idempotency_key_reserved]  (ledger: RESERVED)
+runner A complete-step: COMPLETED  (ledger: COMPLETED)
+cache hand-off A->C: snapshot restored
+runner C replay : REJECT [duplicate: duplicate_idempotency_key]  (ledger: COMPLETED)
+EXPECTED: complete flips to COMPLETED; replay REJECT duplicate -> HOLDS
+```
+
+These three modes are pinned as automated tests in
+`../tests/test_two_runner.py` (S1/S2/S3). S1 is the permanent regression
+witness for the v0.2 failure: if the legacy shape ever stops
+double-accepting in the model, the model has drifted from the properties
+that caused the bug.
