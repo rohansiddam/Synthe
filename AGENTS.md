@@ -36,3 +36,12 @@ python3 src/handoff_check.py <packet.json> \
 - `SPEC.md` — the one-page contract
 - `schema/handoff.schema.json` — the packet format
 - `README.md` — layout, failure states, what v0.1 does and does not do
+
+## Writing a packet from prose
+
+When a handoff arrives as prose, convert it into a packet using only what the prose states.
+
+- Derive the mechanical fields: `id`, `trace_id`, `idempotency_key` (derive from the case or packet id), and `on_failure: "reject"`.
+- Never invent facts. Approvals, artifact hashes, evidence, budgets, tools, and expiry come from the prose, or stay absent and let the checker judge.
+- If the prose states an execution-ledger fact (a key already recorded for a handoff), seed the ledger with that entry instead of starting empty.
+- Run every packet in a batch against ONE ledger file. Never reset it between packets; a fresh ledger per call silently disables duplicate and conflict detection.
