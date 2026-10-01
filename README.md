@@ -5,7 +5,7 @@ receiver runs. Bad handoffs get rejected with a reason, not silently executed.
 
 ## Layout
 
-- `SPEC.md` — the one-page spec
+- `HANDOFF_CONTRACT_V0.1.md` — the one-page spec
 - `schema/handoff.schema.json` — JSON Schema for the packet
 - `src/handoff_check.py` — stdlib-only CLI validator (no dependencies)
 - `examples/` — a valid packet, five rejected packets, an agent registry, a sample artifact
@@ -23,19 +23,37 @@ python3 src/handoff_check.py examples/bad-paraphrase-evidence.json \
 # REJECT invalid: evidence_not_verbatim
 ```
 
-## Use it on your own handoff
-
-1. Write a packet like `examples/valid.json` for the work being handed over (fields are defined in `schema/handoff.schema.json`).
-2. Register your agents in a registry file (see `examples/registry.json`).
-3. Validate before the receiving agent runs:
-
-```bash
-python3 src/handoff_check.py your-handoff.json --registry your-agents.json --workspace . --ledger ledger.json
-```
-
-Or as a GitHub Action: `uses: rohansiddam/Synthe/github-action@main` (see `github-action/README.md`). Agents: `AGENTS.md` explains all of this in agent-readable form.
-
 Exit code 0 = ACCEPT, 2 = REJECT with a failure state and reason codes.
+
+## Ledger semantics (v0.2)
+
+The idempotency ledger records a **claim**, not just a sighting:
+
+- **ACCEPT** (non-dry-run) atomically records the packet's idempotency key
+  as `RESERVED` with the claiming handoff id and timestamp. The write runs
+  under a file lock with a temp-file rename, so two concurrent
+  presentations of the same key cannot both pass.
+- Once the receiver has actually performed the effect, it completes the
+  claim (terminal state, safe to re-run):
+
+  ```bash
+  python3 src/handoff_check.py examples/valid.json \
+    --ledger ledger.json --complete
+  ```
+
+- Re-presenting a `COMPLETED` key -> REJECT `duplicate` ("already completed
+  by handoff X").
+- Re-presenting a `RESERVED` key younger than `--reserve-ttl-hours`
+  (default 24) -> REJECT `duplicate` ("claimed by handoff X; reconcile
+  before redispatch").
+- Re-presenting a `RESERVED` key older than the TTL -> REJECT `unknown`:
+  the receiver may have crashed before or after the effect, so reconcile
+  against the receiver's effect receipt before redispatching.
+
+Ledger entries written by v0.1 (no `state` field) count as `COMPLETED`.
+The ledger is still just a local JSON file; on GitHub-hosted runners the
+bundled Action persists it across runs via `actions/cache` (see
+`github-action/README.md`), because runner workspaces are ephemeral.
 
 ## What v0.1 checks
 
@@ -55,4 +73,6 @@ present, and verbatim fidelity for code/legal-text evidence.
 ## Failure states
 
 `invalid`, `incomplete`, `stale`, `conflicting`, `blocked`, `retryable`
-(reserved; transient-retry classification lands with a runner), `duplicate`.
+(reserved; transient-retry classification lands with a runner), `duplicate`,
+`unknown` (v0.2: a claim was reserved but never completed past its TTL; the
+effect's outcome is unknown until reconciled).

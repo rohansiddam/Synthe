@@ -41,9 +41,24 @@ API boundary: validate it before the receiver runs. Fail closed.
 - **conflicting** — two results disagree; preserve both, route to resolver/human.
 - **blocked** — policy or dependency prevents work; stop, notify owner.
 - **retryable** — transient failure only; retry within budget, then fail visibly.
+- **duplicate** — idempotency key already claimed or completed; do not run again.
+- **unknown** — (v0.2) a claim was RESERVED but never completed past its TTL;
+  the receiver may have crashed before or after the effect. Reconcile against
+  the receiver's effect receipt before redispatching; never blindly re-run.
 
 Core loop: validate → accept / reject → execute. The receiver never starts on an
 unvalidated handoff. A rejection always says why and who must act.
+
+## Claim lifecycle (v0.2)
+
+Acceptance is a claim, not a completion. On ACCEPT the checker atomically
+records the idempotency key as RESERVED in the ledger; the receiver flips it
+to COMPLETED (`--complete`) only after the effect is done. This keeps a crash
+before the effect from being mistaken for a finished execution, and a lost
+ledger from silently re-arming a completed one: COMPLETED re-presentations
+are duplicates, fresh RESERVED re-presentations are duplicates still claimed,
+and stale RESERVED claims surface as **unknown** for reconciliation instead of
+being quietly allowed or blocked.
 
 ## v0.1 non-goals
 
