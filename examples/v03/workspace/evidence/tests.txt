@@ -1,0 +1,1 @@
+14 passed, 0 failed (pytest tests/rules, 2026-09-30)

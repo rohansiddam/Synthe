@@ -1,0 +1,89 @@
+{
+  "agents": {
+    "cora": {
+      "role": "cto",
+      "keys": [
+        {
+          "kid": "cora-test-1",
+          "alg": "Ed25519",
+          "public_key": "DWurOHl6uWHuLoJ0qdsI-svCkpHXhEk1Ao4dxTQ36jI"
+        }
+      ]
+    },
+    "caddy": {
+      "role": "rules-integration",
+      "policy": {
+        "allowed_tools": [
+          "read_repo",
+          "run_tests",
+          "gmail_send"
+        ],
+        "forbidden": [
+          "publish",
+          "delete",
+          "force_push"
+        ],
+        "approval_required_for": [
+          "send_email"
+        ],
+        "trusted_approvers": [
+          "rohan"
+        ],
+        "budget": {
+          "tokens": 100000,
+          "usd": 5,
+          "minutes": 60
+        },
+        "require_signatures": true,
+        "require_signed_approvals": true,
+        "require_planned_actions": true,
+        "verify_evidence": true,
+        "defaults": {
+          "owned_paths": [
+            "rules/**"
+          ],
+          "output_schema": "verdict_pack.v1",
+          "budget": {
+            "tokens": 50000,
+            "usd": 2,
+            "minutes": 30
+          }
+        }
+      },
+      "keys": [
+        {
+          "kid": "caddy-test-1",
+          "alg": "Ed25519",
+          "public_key": "1Od931zZnXzkBFVR6JOuA987Y4iGm6WjlSw6aQRlCS8"
+        }
+      ]
+    },
+    "rohan": {
+      "role": "human-approver",
+      "kind": "human",
+      "keys": [
+        {
+          "kid": "rohan-test-1",
+          "alg": "Ed25519",
+          "public_key": "trLsT9bAx4HtfMcwWuM_F3QNitLM4GZdT-uWmhJqGD4"
+        }
+      ]
+    },
+    "mallory": {
+      "role": "untrusted-test-agent",
+      "keys": [
+        {
+          "kid": "mallory-test-1",
+          "alg": "Ed25519",
+          "public_key": "ET6oZQWkCqQ8ISbo-e6hoeDjEVM1LcOSlwxszx0kh7c"
+        }
+      ]
+    },
+    "lebron": {
+      "role": "head-build"
+    },
+    "lebron-crown": {
+      "alias_of": "lebron"
+    }
+  }
+}
