@@ -3,6 +3,9 @@ description: >-
   Validate an agent-to-agent handoff packet (Handoff Contract v0.1) before a
   receiving agent starts work. Fails the step when the handoff is rejected
   (stale, incomplete, blocked, duplicate, ...) and prints the reason.
+  Two phases: `claim` checks the packet and records a RESERVED claim in a
+  cache-persisted ledger; after the receiving agent's effect is real, a
+  separate `complete` invocation flips the claim to COMPLETED.
 author: 'Synthe'
 branding:
   icon: 'shield'
@@ -23,29 +26,48 @@ inputs:
       on GitHub-hosted runners the workspace is thrown away after every run,
       so a plain ledger file would silently lose duplicate protection. The
       Action restores .synthe/ledger.json from actions/cache before the
-      check and saves it back afterwards (even when the check fails), which
-      gives the claim ledger cross-run durability. If you set this input,
-      you manage that file's persistence yourself and the cache steps are
-      skipped.
+      run and saves it back afterwards, chaining each run to the previous
+      run's saved ledger (see github-action/README.md for the required
+      workflow `concurrency` group that makes this exactly-one-safe).
+      If you set this input, you manage that file's persistence yourself
+      and the cache steps are skipped.
     required: false
     default: ''
   workspace:
     description: 'Workspace root used to check that referenced artifacts exist and match their hashes.'
     required: false
     default: '.'
+  phase:
+    description: >-
+      `claim` (default): validate the packet and record the idempotency
+      claim as RESERVED in the ledger. Run this BEFORE the receiving
+      agent acts. `complete`: after the receiving agent's effect is
+      real, flip the claim from RESERVED to COMPLETED. Invoke this Action
+      a second time with the same packet/registry/ledger inputs and
+      phase: complete. The two phases exist because the cache save in
+      v0.2 ran before the effect, so a later COMPLETED flip was never
+      persisted; each phase now restores, mutates, and re-saves the
+      ledger itself.
+    required: false
+    default: 'claim'
 
 outputs:
   decision:
-    description: 'ACCEPT or REJECT'
-    value: ${{ steps.check.outputs.decision }}
+    description: 'ACCEPT, REJECT, or (phase: complete) COMPLETED'
+    value: ${{ steps.phase.outputs.decision }}
 
 runs:
   using: 'composite'
   steps:
-    # Durability for the claim ledger: hosted runners are ephemeral, so the
-    # ledger is restored from cache before the check and saved back after,
-    # even on failure. Only when the caller did not supply their own ledger
-    # path (in that case persistence is theirs to manage).
+    # Ledger chaining: hosted runners are ephemeral, so the ledger is
+    # restored from actions/cache before the phase and saved back after
+    # it. The save key is unique per run (cache entries are immutable),
+    # and restore uses prefix fallback, so each run restores the NEWEST
+    # snapshot saved by the previous run. Exactly-one safety across runs
+    # additionally requires the caller workflow to serialize runs with a
+    # `concurrency` group (documented in github-action/README.md): the
+    # cache alone cannot order two runs that restore the same snapshot.
+    # Skipped entirely when the caller supplies their own ledger path.
     - name: Restore handoff ledger
       if: inputs.ledger == ''
       uses: actions/cache/restore@v4
@@ -54,14 +76,25 @@ runs:
         key: synthe-ledger-${{ github.repository }}
         restore-keys: |
           synthe-ledger-${{ github.repository }}
-    - id: check
+    - id: phase
       shell: bash
       env:
         HANDOFF_PACKET: ${{ inputs.packet }}
         HANDOFF_REGISTRY: ${{ inputs.registry }}
         HANDOFF_LEDGER: ${{ inputs.ledger != '' && inputs.ledger || '.synthe/ledger.json' }}
         HANDOFF_WORKSPACE: ${{ inputs.workspace }}
-      run: '"${{ github.action_path }}/checker/run_check.sh"'
+        # Selects claim (run_check.sh) vs complete (run_complete.sh).
+        HANDOFF_PHASE: ${{ inputs.phase }}
+      run: |
+        if [ "$HANDOFF_PHASE" = "complete" ]; then
+          "${{ github.action_path }}/checker/run_complete.sh"
+        else
+          "${{ github.action_path }}/checker/run_check.sh"
+        fi
+    # A claim phase must persist the ledger even when the check REJECTED:
+    # rejections are also recorded state (a failed claim attempt must not
+    # reopen the key for a racing retry). Complete phase likewise saves
+    # after the flip. Only for the Action-managed ledger.
     - name: Ensure handoff ledger file exists
       if: always() && inputs.ledger == ''
       shell: bash
@@ -73,4 +106,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .synthe/ledger.json
-        key: synthe-ledger-${{ github.repository }}-${{ github.run_id }}
+        key: synthe-ledger-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
