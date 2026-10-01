@@ -34,7 +34,7 @@ done
 - `src/synthe_crypto.py`, `src/synthe_sign.py`: Ed25519 signing and the keygen/approve/sign/verify CLI
 - `examples/`: v0.1 packets; `examples/v03/`: signed packet + 8 attack packets (test-only keys)
 - `github-action/`: the gate as a GitHub Action
-- `tests/`: 44 tests
+- `tests/`: 45 tests
 
 ## Quickstart
 

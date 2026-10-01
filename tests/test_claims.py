@@ -108,3 +108,27 @@ def test_release_cli_and_legacy_entries(tmp_path):
     ledger.write_text(json.dumps({key: {"state": "RESERVED", "handoff_id": packet["handoff"]["id"],
                                         "reserved_at": dt.datetime.now(dt.timezone.utc).isoformat()}}))
     assert hc.complete(packet, ledger)["decision"] == "COMPLETED"
+
+
+def test_action_log_never_prints_the_claim_token(tmp_path):
+    """Action logs can be public. run_check.sh must blank claim.token while
+    keeping the verdict, the exit code and the reject summary intact."""
+    import os
+    import subprocess
+    ledger = tmp_path / "ledger.json"
+    env = {**os.environ, "HANDOFF_PACKET": str(V3 / "packets" / "valid-signed.json"),
+           "HANDOFF_REGISTRY": str(V3 / "registry.json"), "HANDOFF_LEDGER": str(ledger),
+           "HANDOFF_WORKSPACE": str(V3 / "workspace")}
+    script = ROOT / "github-action" / "checker" / "run_check.sh"
+    out = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    printed = json.loads(out.stdout.split("\nHandoff ACCEPTED")[0])
+    assert printed["decision"] == "ACCEPT"
+    assert printed["claim"] == {"epoch": 1, "token": "<redacted>"}
+    # the claim itself is still recorded, and completion (as the Action does it) still works
+    assert json.loads(ledger.read_text())["cadros:verdict-pack:m1:rev-7"]["claim_token_sha256"]
+    packet = json.loads((V3 / "packets" / "valid-signed.json").read_text())
+    assert hc.complete(packet, ledger)["decision"] == "COMPLETED"
+    # a replay is still a clean REJECT with its reasons in the log
+    again = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+    assert again.returncode == 1 and "duplicate" in again.stdout and "<redacted>" not in again.stdout

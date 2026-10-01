@@ -36,6 +36,22 @@ args=("$packet")
 
 output="$(python3 "$SCRIPT_DIR/handoff_check.py" "${args[@]}")"
 code=$?
+
+# An ACCEPT carries the claim token (claim.token). Action logs can be public,
+# and nothing in this Action needs the token (run_complete.sh completes by
+# packet), so it is never printed.
+output="$(printf '%s' "$output" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.stdout.write(raw)
+else:
+    if isinstance(d, dict) and isinstance(d.get("claim"), dict) and "token" in d["claim"]:
+        d["claim"]["token"] = "<redacted>"
+    sys.stdout.write(json.dumps(d, indent=2))
+')"
 echo "$output"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
