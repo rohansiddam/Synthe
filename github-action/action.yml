@@ -61,10 +61,14 @@ runs:
   steps:
     # Ledger chaining: hosted runners are ephemeral, so the ledger is
     # restored from actions/cache before the phase and saved back after
-    # it. The save key is unique per run (cache entries are immutable),
-    # and restore uses prefix fallback, so each run restores the NEWEST
-    # snapshot saved by the previous run. Exactly-one safety across runs
-    # additionally requires the caller workflow to serialize runs with a
+    # it. The save key is unique per run AND per phase (cache entries
+    # are immutable: when claim and complete shared one save key, the
+    # complete phase's save silently lost to the claim phase's earlier
+    # save in the same run and the COMPLETED flip was never persisted).
+    # Restore uses prefix fallback, so each phase restores the NEWEST
+    # snapshot: the complete phase in the same run sees this run's
+    # claim save, and the next run sees the completed snapshot.
+    # Exactly-one safety across runs additionally requires the caller workflow to serialize runs with a
     # `concurrency` group (documented in github-action/README.md): the
     # cache alone cannot order two runs that restore the same snapshot.
     # Skipped entirely when the caller supplies their own ledger path.
@@ -106,4 +110,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .synthe/ledger.json
-        key: synthe-ledger-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: synthe-ledger-${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
