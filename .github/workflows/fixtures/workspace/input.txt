@@ -1,0 +1,1 @@
+Fixed input artifact for the manual Synthe two-runner verification. The committed packet.json records this file's sha256.

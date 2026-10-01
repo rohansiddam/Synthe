@@ -1,0 +1,66 @@
+name: Synthe two-runner verification (manual)
+
+# One-time REAL GitHub verification for the Option 2 Action design.
+#
+# How to verify:
+#   1. Open Actions -> "Synthe two-runner verification (manual)".
+#   2. Click "Run workflow" twice in quick succession.
+#   3. The concurrency group below serializes the two dispatches. The first
+#      run should ACCEPT the fixed verification packet and complete it. The
+#      second run should restore the first run's saved ledger and REJECT
+#      the claim as a duplicate. PASS means exactly one run shows ACCEPT.
+#
+# This is verification tooling, not a product workflow. Its packet and
+# idempotency key are fixed on purpose (.github/workflows/fixtures/), so
+# repeat dispatches after a successful pair should also REJECT because
+# the completed key remains in the Action-managed ledger cache chain.
+"on":
+  workflow_dispatch:
+
+# REQUIRED caller shape for cross-run exactly-one claims. Every workflow
+# that uses ./github-action against this repository's managed ledger must
+# join this same group. Do not cancel in progress: a cancelled claimant
+# would strand the queue.
+concurrency:
+  group: synthe-handoff-ledger
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-two-runner:
+    name: Verify exactly one claim wins
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 1. CLAIM: validate the fixed packet and record RESERVED.
+      # In the first of two quick dispatches this should ACCEPT. In the
+      # second it should fail with REJECT duplicate (the key is already
+      # COMPLETED by then, or still RESERVED if completion has not yet
+      # been saved in an interrupted first run).
+      - name: Claim verification handoff
+        id: claim
+        uses: ./github-action
+        with:
+          packet: .github/workflows/fixtures/packet.json
+          registry: .github/workflows/fixtures/registry.json
+          workspace: .github/workflows/fixtures/workspace
+          phase: claim
+
+      # 2. EFFECT: a real receiver would do its work here. This fixture
+      # step only proves the phase ordering around an effect boundary.
+      - name: Simulated receiver effect
+        run: echo "Receiver effect completed for the one winning claim."
+
+      # 3. COMPLETE: flip RESERVED -> COMPLETED and persist the flip via
+      # the Action's own restore/mutate/save cycle.
+      - name: Complete verification handoff
+        uses: ./github-action
+        with:
+          packet: .github/workflows/fixtures/packet.json
+          registry: .github/workflows/fixtures/registry.json
+          workspace: .github/workflows/fixtures/workspace
+          phase: complete
