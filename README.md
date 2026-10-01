@@ -4,13 +4,37 @@ Synthe checks every handoff between AI agents before the receiving agent acts on
 
 Most agent-to-agent handoffs today are blobs of text that the receiving agent takes on trust. That is how the same work gets done twice, stale artifacts get acted on, and actions nobody approved slip through. Synthe puts a gate in the middle: every handoff arrives as a typed packet, gets validated against a registry and the actual artifacts it points to, and gets an ACCEPT or a REJECT with a reason. Every accepted handoff is recorded, so the same one cannot be claimed twice.
 
+## v0.3
+
+Receiver policy (authority can only narrow), Ed25519-signed packets and
+approvals, evidence pinning, fail-closed parsing, and a hardened claim ledger
+(claim tokens, `--release`, `fenced()`).
+
+- **The contract:** [`SPEC.md`](SPEC.md): fields, policy, signatures, validation order, every reason code
+- **What it does and doesn't protect:** [`THREAT_MODEL.md`](THREAT_MODEL.md)
+- **Try to break it:** `examples/v03/` has one valid signed packet and 8 attacks
+  (tampered after signing, spoofed sender, self-granted authority, forged approval,
+  replayed approval, exceeding receiver policy, paraphrased "verbatim" evidence,
+  undeclared actions). The keys in `examples/v03/test-keys/` are public test keys.
+
+```bash
+for f in examples/v03/packets/*.json; do
+  echo "== $(basename $f)"
+  python3 src/handoff_check.py "$f" --registry examples/v03/registry.json \
+    --workspace examples/v03/workspace --dry-run | head -8
+done
+```
+
 ## Layout
 
-- `HANDOFF_CONTRACT_V0.1.md` — the one-page spec
-- `schema/handoff.schema.json` — JSON Schema for the packet
-- `src/handoff_check.py` — stdlib-only CLI validator (no dependencies)
-- `examples/` — a valid packet, five rejected packets, an agent registry, a sample artifact
-- `tests/test_validator.py` — 14 tests modeled on real Cadros failure classes
+- `SPEC.md`: the contract (v0.3)
+- `THREAT_MODEL.md`: what the gate stops and what it doesn't
+- `schema/handoff.schema.json`: JSON Schema for the packet
+- `src/handoff_check.py`: the checker (stdlib only; CLI + `check()` used by every entry point)
+- `src/synthe_crypto.py`, `src/synthe_sign.py`: Ed25519 signing and the keygen/approve/sign/verify CLI
+- `examples/`: v0.1 packets; `examples/v03/`: signed packet + 8 attack packets (test-only keys)
+- `github-action/`: the gate as a GitHub Action
+- `tests/`: 45 tests
 
 ## Quickstart
 
@@ -34,6 +58,9 @@ The idempotency ledger records a **claim**, not just a sighting:
   as `RESERVED` with the claiming handoff id and timestamp. The write runs
   under a file lock with a temp-file rename, so two concurrent
   presentations of the same key cannot both pass.
+- The ACCEPT returns `claim: {epoch, token}`. Completion is bound to that exact
+  packet (and token, when given). For non-idempotent effects, use
+  `fenced()` so a released claim's old holder can't act (see `SPEC.md` §8).
 - Once the receiver has actually performed the effect, it completes the
   claim (terminal state, safe to re-run):
 

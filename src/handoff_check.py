@@ -19,10 +19,14 @@ a temp-file + os.replace save, so concurrent invocations cannot both pass.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -80,6 +84,21 @@ def entry_state(entry: dict) -> str:
     return entry.get("state") or "COMPLETED"
 
 
+def handoff_digest(h: dict) -> str:
+    """SHA-256 of the canonical handoff object: the exact claim a ledger
+    entry is bound to."""
+    try:
+        import synthe_crypto as sc
+        data = sc.canonical_json(h)
+    except ImportError:  # pragma: no cover - synthe_crypto ships alongside
+        data = json.dumps(h, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 class LockedLedger:
     """Exclusive, crash-safe handle on the ledger file.
 
@@ -127,14 +146,280 @@ def fail(state: str, code: str, msg: str, reasons: list) -> None:
     reasons.append({"state": state, "code": code, "message": msg})
 
 
+def resolve_in_workspace(workspace: Path, rel: str) -> Path | None:
+    """Resolve rel under workspace; None if it is absolute or escapes the root
+    (via '..' or a symlink). The checker must never become a file-existence or
+    hash oracle for paths outside the workspace it was given."""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel) or rel.startswith("~"):
+        return None
+    base = workspace.resolve()
+    target = (base / rel).resolve()
+    if target != base and base not in target.parents:
+        return None
+    return target
+
+
+def parse_utc(value) -> tuple[dt.datetime | None, str | None]:
+    """Parse an ISO 8601 timestamp that carries an explicit UTC offset.
+    Returns (datetime, None) or (None, problem). Naive timestamps are rejected
+    rather than guessed, so they can never crash the comparison."""
+    ts = parse_ts(value) if isinstance(value, str) else None
+    if ts is None:
+        return None, "not a valid ISO 8601 timestamp"
+    if ts.tzinfo is None:
+        return None, "timestamp has no UTC offset (use e.g. 2026-10-01T00:00:00Z)"
+    return ts, None
+
+
+_LIST_SETS = ("forbidden", "approval_required_for")       # restrictions: union
+_LIST_CEILINGS = ("allowed_tools", "trusted_approvers")    # grants: intersection
+_FLAGS = ("require_signatures", "require_signed_approvals", "verify_evidence",
+          "require_planned_actions")
+
+
+def receiver_policy(registry: dict | None, receiver: str) -> dict | None:
+    """Merge the registry-wide `policy` with the receiver's own `policy`.
+
+    Policy is the receiver's (operator's) statement of what it will ever
+    accept. A packet may only narrow it: restrictions union, grants
+    intersect, budgets take the minimum, flags OR together."""
+    if not isinstance(registry, dict):
+        return None
+    layers = []
+    if isinstance(registry.get("policy"), dict):
+        layers.append(registry["policy"])
+    agent = registry.get("agents", {}).get(receiver)
+    if isinstance(agent, dict) and isinstance(agent.get("policy"), dict):
+        layers.append(agent["policy"])
+    if not layers:
+        return None
+    merged: dict = {}
+    for layer in layers:
+        for k, v in layer.items():
+            if k in _LIST_SETS:
+                merged[k] = sorted(set(merged.get(k, [])) | set(v or []))
+            elif k in _LIST_CEILINGS:
+                merged[k] = sorted(set(merged[k]) & set(v or [])) if k in merged else sorted(set(v or []))
+            elif k == "budget" and isinstance(v, dict):
+                cur = merged.get("budget", {})
+                merged["budget"] = {kk: min(x for x in (cur.get(kk), v.get(kk)) if x is not None)
+                                    for kk in set(cur) | set(v)}
+            elif k == "defaults" and isinstance(v, dict):
+                merged["defaults"] = {**merged.get("defaults", {}), **v}
+            elif k in _FLAGS:
+                merged[k] = bool(merged.get(k)) or bool(v)
+            else:
+                merged[k] = v
+    return merged
+
+
+_DEFAULT_SLOTS = {
+    "owned_paths": ("scope", "owned_paths"),
+    "forbidden": ("scope", "forbidden"),
+    "allowed_tools": ("authority", "allowed_tools"),
+    "approval_required_for": ("authority", "approval_required_for"),
+    "output_schema": ("acceptance", "output_schema"),
+    "required_evidence": ("acceptance", "required_evidence"),
+    "expires_at": ("acceptance", "expires_at"),
+}
+
+
+def apply_receiver_defaults(h: dict, policy: dict | None) -> list:
+    """Fill fields the sender left out from the receiver's declared defaults.
+
+    This is not inventing facts: the receiver's own policy is a legitimate
+    source for *its* constraints (where it may write, what it must output,
+    its budget). It never fills sender-side facts: identity, artifacts,
+    evidence, approvals, idempotency key. Every fill is reported."""
+    applied: list = []
+    defaults = (policy or {}).get("defaults") or {}
+    if not isinstance(defaults, dict):
+        return applied
+    for key, value in defaults.items():
+        if key == "budget" and isinstance(value, dict):
+            auth = h.setdefault("authority", {})
+            if not isinstance(auth, dict):
+                continue
+            budget = auth.get("budget")
+            if budget is None:
+                budget = auth["budget"] = {}
+            if not isinstance(budget, dict):
+                continue
+            for dim, amount in value.items():
+                if dim not in budget:
+                    budget[dim] = amount
+                    applied.append(f"authority.budget.{dim}")
+        elif key == "on_failure":
+            if h.get("on_failure") in (None, ""):
+                h["on_failure"] = value
+                applied.append("on_failure")
+        elif key in _DEFAULT_SLOTS:
+            section, field = _DEFAULT_SLOTS[key]
+            sec = h.setdefault(section, {})
+            if isinstance(sec, dict) and sec.get(field) in (None, ""):
+                sec[field] = copy.deepcopy(value)
+                applied.append(f"{section}.{field}")
+    return applied
+
+
+def _shape_errors(h: dict) -> list:
+    """Element-level shape checks so malformed entries yield `invalid`
+    instead of a KeyError/TypeError traceback (fail closed with a verdict)."""
+    errs: list = []
+
+    def str_list(value, name):
+        if value is None:
+            return
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            errs.append((f"malformed:{name}", f"{name} must be a list of strings"))
+
+    def obj_list(value, name, required):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            errs.append((f"malformed:{name}", f"{name} must be a list"))
+            return []
+        good = []
+        for i, item in enumerate(value):
+            if not isinstance(item, dict) or any(
+                    not isinstance(item.get(r), str) or not item.get(r) for r in required):
+                errs.append((f"malformed:{name}[{i}]",
+                             f"{name}[{i}] must be an object with non-empty {', '.join(required)}"))
+            else:
+                good.append(item)
+        return good
+
+    scope, auth, acc, inputs = h["scope"], h["authority"], h["acceptance"], h["inputs"]
+    str_list(scope.get("forbidden"), "scope.forbidden")
+    str_list(scope.get("owned_paths"), "scope.owned_paths")
+    str_list(auth.get("allowed_tools"), "authority.allowed_tools")
+    str_list(auth.get("approval_required_for"), "authority.approval_required_for")
+    str_list(acc.get("required_evidence"), "acceptance.required_evidence")
+    for i, ref in enumerate(obj_list(inputs.get("artifact_refs"), "inputs.artifact_refs", ["path"])):
+        if ref.get("sha256") is not None and not _is_sha256(ref.get("sha256")):
+            errs.append((f"bad_sha256:inputs.artifact_refs[{i}]",
+                         f"inputs.artifact_refs[{i}].sha256 must be a full 64-hex SHA-256 "
+                         f"(abbreviated or placeholder hashes are not accepted)"))
+    for i, act in enumerate(obj_list(h.get("planned_actions"), "planned_actions", ["name", "tool"])):
+        for k in ("est_tokens", "est_usd", "est_minutes"):
+            v = act.get(k)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0):
+                errs.append((f"malformed:planned_actions[{i}].{k}", f"{k} must be a non-negative number"))
+    obj_list(auth.get("approvals"), "authority.approvals", ["action", "approver"])
+    for i, ev in enumerate(obj_list(acc.get("evidence"), "acceptance.evidence", ["kind"])):
+        if ev.get("sha256") is not None and not _is_sha256(ev.get("sha256")):
+            errs.append((f"bad_sha256:acceptance.evidence[{i}]",
+                         f"acceptance.evidence[{i}].sha256 must be a full 64-hex SHA-256"))
+    budget = auth.get("budget")
+    if isinstance(budget, dict):
+        for k in ("tokens", "usd", "minutes"):
+            v = budget.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0:
+                errs.append(("malformed:authority.budget", f"authority.budget.{k} must be >= 0"))
+    return errs
+
+
+def _is_sha256(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+def _verify_packet_signature(packet: dict, h_signed: dict, registry: dict | None,
+                             policy: dict | None, reasons: list, info: dict) -> None:
+    sig = packet.get("signature")
+    if sig is None:
+        info["signature"] = "absent"
+        if policy and policy.get("require_signatures"):
+            fail("invalid", "signature_missing",
+                 "receiver policy requires a signed packet; none present", reasons)
+        return
+    try:
+        import synthe_crypto as sc
+    except ImportError:
+        fail("invalid", "signature_unsupported", "synthe_crypto.py not found next to the checker", reasons)
+        return
+    if not isinstance(sig, dict) or not isinstance(sig.get("sig"), str):
+        fail("invalid", "signature_malformed", "signature must be an object with a 'sig' string", reasons)
+        return
+    if sig.get("alg", sc.ALG) != sc.ALG:
+        fail("invalid", "signature_alg_unsupported", f"unsupported signature alg: {sig.get('alg')}", reasons)
+        return
+    signer = sig.get("signer")
+    if signer != h_signed.get("from"):
+        fail("invalid", "signature_signer_mismatch",
+             f"packet signed by '{signer}' but claims to be from '{h_signed.get('from')}'", reasons)
+        return
+    key = sc.find_key(registry, signer, sig.get("kid"))
+    if key is None:
+        fail("invalid", "signature_key_unknown",
+             f"no Ed25519 key on record for '{signer}' (kid={sig.get('kid')})", reasons)
+        return
+    try:
+        raw = sc.unb64u(sig["sig"])
+    except Exception:
+        raw = b""
+    if not sc.verify_bytes(key, sc.packet_signing_input(h_signed), raw):
+        fail("invalid", "signature_invalid",
+             "packet signature does not verify (packet altered after signing, or wrong key)", reasons)
+        return
+    info["signature"] = "verified"
+
+
+def _approval_ok(name: str, candidates: list, h: dict, registry, policy, at) -> list:
+    """Return [] if any candidate approval is valid for `name`, else the
+    (code, message) problems of the candidates."""
+    problems: list = []
+    trusted = (policy or {}).get("trusted_approvers")
+    need_sig = bool((policy or {}).get("require_signed_approvals"))
+    for appr in candidates:
+        mine: list = []
+        if appr.get("expires_at"):
+            aexp, why = parse_utc(appr["expires_at"])
+            if aexp is None:
+                mine.append(("approval_expires_invalid", f"approval for '{name}': expires_at {why}"))
+            elif aexp <= at:
+                mine.append(("approval_expired", f"approval for '{name}' expired at {appr['expires_at']}"))
+        if trusted is not None and appr.get("approver") not in trusted:
+            mine.append(("approver_not_trusted",
+                         f"approval for '{name}' is from '{appr.get('approver')}', "
+                         f"who is not a trusted approver for this receiver"))
+        if appr.get("sig") is not None:
+            try:
+                import synthe_crypto as sc
+                key = sc.find_key(registry, appr.get("approver"), appr.get("kid"))
+                good = key is not None and sc.verify_bytes(
+                    key, sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
+            except Exception:
+                good = False
+            if not good:
+                mine.append(("approval_signature_invalid",
+                             f"approval for '{name}' carries a signature that does not verify "
+                             f"for approver '{appr.get('approver')}' on this handoff"))
+        elif need_sig:
+            mine.append(("approval_unsigned",
+                         f"approval for '{name}' is unsigned; receiver policy requires the "
+                         f"approver's signature (a sender cannot write approvals on others' behalf)"))
+        if not mine:
+            return []
+        problems.extend(mine)
+    return problems
+
+
 def validate(packet: dict, *, registry: dict | None, ledger: dict,
              workspace: Path | None, at: dt.datetime,
-             reserve_ttl_hours: float = 24.0) -> tuple[bool, list]:
+             reserve_ttl_hours: float = 24.0, info: dict | None = None,
+             verify_evidence: bool = False) -> tuple[bool, list]:
     reasons: list = []
-    h = packet.get("handoff")
-    if not isinstance(h, dict):
+    info = {} if info is None else info
+    h_signed = packet.get("handoff") if isinstance(packet, dict) else None
+    if not isinstance(h_signed, dict):
         fail("invalid", "missing_handoff", "packet must contain a 'handoff' object", reasons)
         return False, reasons
+    # Work on a copy: receiver defaults never alter the bytes the sender signed.
+    h = copy.deepcopy(h_signed)
+    policy = receiver_policy(registry, h.get("to")) if isinstance(h.get("to"), str) else None
+    applied = apply_receiver_defaults(h, policy)
+    if applied:
+        info["defaults_applied"] = applied
 
     # 1. structural / required fields
     for field in REQUIRED:
@@ -146,6 +431,9 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         fail("invalid", "bad_schema_version", f"unsupported schema_version: {h['schema_version']}", reasons)
     if h["on_failure"] not in {"reject", "retry_with_budget", "escalate", "request_human"}:
         fail("invalid", "bad_on_failure", f"unknown on_failure: {h['on_failure']}", reasons)
+    for name in ("id", "idempotency_key", "trace_id", "from", "to", "purpose"):
+        if not isinstance(h[name], str):
+            fail("invalid", f"malformed:{name}", f"{name} must be a string", reasons)
 
     scope, auth, acc = h["scope"], h["authority"], h["acceptance"]
     for d, name in ((scope, "scope"), (auth, "authority"), (acc, "acceptance"), (h["inputs"], "inputs")):
@@ -171,13 +459,22 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
             fail("invalid", f"missing_field:{name}", f"required field missing: {name}", reasons)
     budget = auth.get("budget")
     if not isinstance(budget, dict) or any(
-            not isinstance(budget.get(k), (int, float)) for k in ("tokens", "usd", "minutes")):
+            isinstance(budget.get(k), bool) or not isinstance(budget.get(k), (int, float))
+            for k in ("tokens", "usd", "minutes")):
         fail("invalid", "missing_field:authority.budget",
              "authority.budget must define numeric tokens, usd, and minutes", reasons)
     if reasons:
         return False, reasons
+    for code, msg in _shape_errors(h):
+        fail("invalid", code, msg, reasons)
+    if policy and policy.get("require_planned_actions") and not h.get("planned_actions"):
+        fail("invalid", "planned_actions_missing",
+             "receiver policy requires planned_actions: authority cannot be checked "
+             "against actions the sender did not declare", reasons)
+    if reasons:
+        return False, reasons
 
-    # 2. identity (canonical registry; aliases must resolve)
+    # 2. identity (canonical registry; aliases must resolve) + signature
     if registry is not None:
         agents = registry.get("agents", {})
         for role in ("from", "to"):
@@ -187,11 +484,16 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
             elif agents[who].get("alias_of"):
                 fail("invalid", f"alias_not_canonical:{role}",
                      f"{role} '{who}' is an alias of '{agents[who]['alias_of']}'; use the canonical id", reasons)
+    _verify_packet_signature(packet, h_signed, registry, policy, reasons, info)
 
     # 3. duplication (idempotency claim state machine)
     key = h["idempotency_key"]
     prev = ledger.get(key)
+    if isinstance(prev, dict) and prev.get("state") == "RELEASED":
+        prev = None  # reconciled and reopened by the operator (see release())
     if prev is not None:
+        if not isinstance(prev, dict):
+            prev = {}
         if entry_state(prev) == "COMPLETED":
             same = prev.get("handoff_id") == h["id"] and prev.get("trace_id") == h["trace_id"]
             when = prev.get("completed_at") or prev.get("accepted_at") or "an earlier run"
@@ -216,49 +518,77 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
                      reasons)
 
     # 4. freshness
-    exp = parse_ts(acc["expires_at"])
+    exp, why = parse_utc(acc["expires_at"])
     if exp is None:
-        fail("invalid", "bad_expires_at", "acceptance.expires_at is not a valid ISO 8601 timestamp", reasons)
+        fail("invalid", "bad_expires_at", f"acceptance.expires_at: {why}", reasons)
     elif exp <= at:
         fail("stale", "handoff_expired", f"handoff expired at {acc['expires_at']}", reasons)
 
-    # 5. authority: planned actions vs tools / forbidden / approvals / budget
-    est = {"tokens": 0.0, "usd": 0.0, "minutes": 0.0}
-    approvals = {a["action"]: a for a in auth.get("approvals", [])}
-    forbidden = set(scope.get("forbidden", []))
+    # 5. authority: planned actions vs tools / forbidden / approvals / budget,
+    #    with the receiver policy as a ceiling the packet can only narrow.
+    pol = policy or {}
+    forbidden = set(scope.get("forbidden", [])) | set(pol.get("forbidden", []))
     allowed = set(auth.get("allowed_tools", []))
-    for act in h.get("planned_actions", []):
+    ceiling_tools = set(pol["allowed_tools"]) if "allowed_tools" in pol else None
+    needs_approval = set(auth.get("approval_required_for", [])) | set(pol.get("approval_required_for", []))
+    if ceiling_tools is not None and allowed - ceiling_tools:
+        fail("blocked", "authority_exceeds_receiver_policy",
+             f"packet grants tools the receiver never allows: {sorted(allowed - ceiling_tools)}", reasons)
+    approvals_by_action: dict = {}
+    for a in auth.get("approvals", []) or []:
+        approvals_by_action.setdefault(a["action"], []).append(a)
+    est = {"tokens": 0.0, "usd": 0.0, "minutes": 0.0}
+    for act in h.get("planned_actions", []) or []:
         name, tool = act["name"], act["tool"]
         if tool not in allowed:
             fail("blocked", "tool_not_allowed", f"action '{name}' uses tool '{tool}' not in allowed_tools", reasons)
+        elif ceiling_tools is not None and tool not in ceiling_tools:
+            fail("blocked", "tool_not_allowed_by_receiver",
+                 f"action '{name}' uses tool '{tool}' that receiver policy does not allow", reasons)
         if name in forbidden or tool in forbidden:
             fail("blocked", "forbidden_action", f"action '{name}' is forbidden by scope", reasons)
-        if name in auth.get("approval_required_for", []):
-            appr = approvals.get(name)
-            if appr is None:
+        if name in needs_approval or tool in needs_approval:
+            cands = approvals_by_action.get(name, []) + (
+                approvals_by_action.get(tool, []) if tool != name else [])
+            if not cands:
                 fail("blocked", "approval_missing", f"action '{name}' needs approval; none recorded", reasons)
             else:
-                aexp = parse_ts(appr["expires_at"]) if appr.get("expires_at") else None
-                if aexp is not None and aexp <= at:
-                    fail("blocked", "approval_expired", f"approval for '{name}' expired at {appr['expires_at']}", reasons)
+                for code, msg in _approval_ok(name, cands, h, registry, policy, at):
+                    fail("blocked", code, msg, reasons)
         for k in est:
-            est[k] += float(act.get(f"est_{k if k != 'minutes' else 'minutes'}", 0) or 0)
-    budget = auth["budget"]
+            est[k] += float(act.get(f"est_{k}", 0) or 0)
+    ceiling_budget = pol.get("budget") or {}
     for k in ("tokens", "usd", "minutes"):
-        if est[k] > float(budget[k]):
-            fail("blocked", "budget_exceeded", f"estimated {k} {est[k]} exceeds budget {budget[k]}", reasons)
+        limit = float(budget[k])
+        if k in ceiling_budget:
+            if limit > float(ceiling_budget[k]):
+                fail("blocked", "authority_exceeds_receiver_policy",
+                     f"packet budget {k} {budget[k]} exceeds receiver ceiling {ceiling_budget[k]}", reasons)
+            limit = min(limit, float(ceiling_budget[k]))
+        if est[k] > limit:
+            fail("blocked", "budget_exceeded", f"estimated {k} {est[k]} exceeds budget {limit:g}", reasons)
 
     # 6. artifacts: existence + hash (when a workspace root is given)
+    if workspace is None and pol and h["inputs"].get("artifact_refs"):
+        # Fail closed: a receiver with a policy expects its pins to hold, and
+        # without a workspace root the artifact hashes cannot be checked.
+        fail("invalid", "workspace_required",
+             "receiver policy is in force but no workspace root was given, so the "
+             "pinned artifact hashes cannot be checked; run the checker with --workspace",
+             reasons)
     if workspace is not None:
         for ref in h["inputs"].get("artifact_refs", []):
-            p = (workspace / ref["path"])
-            if not p.exists():
+            p = resolve_in_workspace(workspace, ref["path"])
+            if p is None:
+                fail("invalid", "artifact_path_escapes_workspace",
+                     f"artifact path is absolute or escapes the workspace: {ref['path']}", reasons)
+            elif not p.is_file():
                 fail("incomplete", "artifact_missing", f"input artifact not found: {ref['path']}", reasons)
-            elif ref.get("sha256") and sha256_file(p) != ref["sha256"]:
+            elif ref.get("sha256") and sha256_file(p) != ref["sha256"].lower():
                 fail("stale", "artifact_hash_mismatch", f"artifact changed since handoff: {ref['path']}", reasons)
 
     # 7. evidence fidelity + completeness
-    evidence = acc.get("evidence", [])
+    evidence = acc.get("evidence", []) or []
     kinds = {e.get("kind") for e in evidence}
     for req in acc.get("required_evidence", []):
         if req not in kinds:
@@ -267,71 +597,277 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         if e.get("kind") in VERBATIM_KINDS and e.get("verbatim") is not True:
             fail("invalid", "evidence_not_verbatim",
                  f"evidence '{e.get('kind')}' must be verbatim, not a paraphrase/summary", reasons)
+    if verify_evidence or pol.get("verify_evidence"):
+        # Evidence is only as good as the bytes it points at: every item must
+        # reference a workspace file, and verbatim items must pin its hash.
+        if workspace is None and evidence:
+            # Fail closed: without a workspace root the pinned hashes cannot
+            # be checked, so the policy's guarantee would silently not hold.
+            fail("invalid", "workspace_required",
+                 "evidence verification is required but no workspace root was given; "
+                 "run the checker with --workspace", reasons)
+        for i, e in enumerate(evidence):
+            if e.get("kind") in VERBATIM_KINDS and not e.get("sha256"):
+                fail("invalid", "verbatim_evidence_unpinned",
+                     f"evidence[{i}] '{e.get('kind')}' claims verbatim but pins no sha256; "
+                     f"'verbatim' is unverifiable without the hash of the quoted source", reasons)
+            ref = e.get("ref")
+            if not ref:
+                fail("incomplete", "evidence_unreferenced",
+                     f"evidence[{i}] '{e.get('kind')}' has no ref; nothing to verify", reasons)
+                continue
+            if workspace is None:
+                continue
+            p = resolve_in_workspace(workspace, ref.split("#", 1)[0])
+            if p is None:
+                fail("invalid", "evidence_path_escapes_workspace",
+                     f"evidence[{i}] ref is absolute or escapes the workspace: {ref}", reasons)
+            elif not p.is_file():
+                fail("incomplete", "evidence_ref_missing", f"evidence[{i}] ref not found: {ref}", reasons)
+            elif e.get("sha256") and sha256_file(p) != e["sha256"].lower():
+                fail("stale", "evidence_hash_mismatch",
+                     f"evidence[{i}] bytes do not match the pinned sha256: {ref}", reasons)
 
     return not reasons, reasons
 
 
-def _print_reject(state: str, code: str, message: str) -> int:
-    print(json.dumps({"decision": "REJECT", "state": state, "reasons": [
-        {"state": state, "code": code, "message": message}]}, indent=2))
-    return 2
+def _reject(state: str, code: str, message: str) -> dict:
+    return {"decision": "REJECT", "state": state,
+            "reasons": [{"state": state, "code": code, "message": message}]}
 
 
-def _emit(ok: bool, reasons: list, h: dict) -> int:
+def _result(ok: bool, reasons: list, h: dict, info: dict) -> dict:
     if ok:
-        print(json.dumps({"decision": "ACCEPT", "handoff_id": h.get("id"),
-                          "trace_id": h.get("trace_id")}, indent=2))
-        return 0
-    print(json.dumps({"decision": "REJECT", "state": reasons[0]["state"],
-                      "reasons": reasons}, indent=2))
-    return 2
+        out = {"decision": "ACCEPT", "handoff_id": h.get("id"), "trace_id": h.get("trace_id")}
+    else:
+        out = {"decision": "REJECT", "state": reasons[0]["state"], "reasons": reasons}
+    if info.get("defaults_applied"):
+        out["defaults_applied"] = info["defaults_applied"]
+    if info.get("signature") == "verified":
+        out["signature"] = "verified"
+    return out
 
 
-def complete_mode(args, packet: dict) -> int:
+def check(packet, *, registry: dict | None, ledger_path: Path | None,
+          workspace: Path | None, dry_run: bool = False,
+          reserve_ttl_hours: float = 24.0, verify_evidence: bool = False) -> dict:
+    """Validate a packet and (unless dry_run) atomically record a RESERVED
+    claim on ACCEPT. Returns the verdict as a dict. Used by the CLI and the
+    GitHub Action so every entry point shares one code path."""
+    if not isinstance(packet, dict):
+        return _reject("invalid", "missing_handoff", "packet must be a JSON object with a 'handoff' object")
+    h = packet.get("handoff") if isinstance(packet.get("handoff"), dict) else {}
+    info: dict = {}
+    kwargs = dict(registry=registry, workspace=workspace, at=now_utc(),
+                  reserve_ttl_hours=reserve_ttl_hours, info=info,
+                  verify_evidence=verify_evidence)
+    if ledger_path is not None and not dry_run:
+        # Atomic claim: validate and record RESERVED under one lock, so two
+        # concurrent presentations of the same key cannot both pass.
+        with LockedLedger(ledger_path) as locked:
+            ledger = locked.ledger
+            if ledger.get("_corrupt"):
+                return _reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
+            ok, reasons = validate(packet, ledger=ledger, **kwargs)
+            if not ok:
+                return _result(ok, reasons, h, info)
+            # The claim is bound to this exact packet (digest) and to whoever
+            # holds the token returned below. `epoch` is the fencing number:
+            # it rises every time the key is re-claimed after a release, so a
+            # stale holder's fenced() effect is refused.
+            prev = ledger.get(h["idempotency_key"])
+            epoch = (prev.get("epoch", 0) if isinstance(prev, dict) else 0) + 1
+            token = secrets.token_urlsafe(24)
+            ledger[h["idempotency_key"]] = {
+                "state": "RESERVED",
+                "handoff_id": h["id"],
+                "trace_id": h["trace_id"],
+                "from": h["from"],
+                "to": h["to"],
+                "reserved_at": now_utc().isoformat(),
+                "signature": info.get("signature", "absent"),
+                "epoch": epoch,
+                "packet_sha256": handoff_digest(h),
+                "claim_token_sha256": _token_hash(token),
+            }
+            locked.dirty = True
+            out = _result(ok, reasons, h, info)
+            out["claim"] = {"epoch": epoch, "token": token}
+            return out
+    ledger = load_ledger(ledger_path) if ledger_path else {}
+    if ledger.get("_corrupt"):
+        return _reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
+    ok, reasons = validate(packet, ledger=ledger, **kwargs)
+    return _result(ok, reasons, h, info)
+
+
+def _claim_problem(entry, h: dict, claim_token: str | None, require_token: bool):
+    """Why `h` (+ token) may NOT act on this ledger entry, or None. Shared by
+    complete() and fenced(): only the claim's own packet, and its token
+    holder when tokens are in use, may complete it or run its effect."""
+    key = h.get("idempotency_key")
+    if entry is None or entry_state(entry) == "RELEASED":
+        return _reject("invalid", "completion_unknown_key",
+                       f"no live ledger claim for idempotency_key '{key}'; "
+                       f"nothing is reserved under this key")
+    if entry.get("handoff_id") not in (None, h.get("id")):
+        return _reject("conflicting", "completion_handoff_mismatch",
+                       f"idempotency_key '{key}' was claimed by handoff "
+                       f"{entry.get('handoff_id')}, not {h.get('id')}")
+    if entry.get("packet_sha256") and handoff_digest(h) != entry["packet_sha256"]:
+        return _reject("conflicting", "completion_packet_mismatch",
+                       f"this is not the packet that claimed idempotency_key '{key}' "
+                       f"(digest differs); only the claimed packet can complete it")
+    want = entry.get("claim_token_sha256")
+    if want and claim_token is not None:
+        if not hmac.compare_digest(_token_hash(str(claim_token)), want):
+            return _reject("conflicting", "claim_token_invalid",
+                           f"claim token does not match the claim on '{key}'")
+    elif want and require_token:
+        return _reject("invalid", "claim_token_required",
+                       f"completing '{key}' requires the claim token returned with its ACCEPT")
+    return None
+
+
+def complete(packet, ledger_path: Path | None, claim_token: str | None = None,
+             require_token: bool = False) -> dict:
     """Flip the packet's idempotency-key entry RESERVED -> COMPLETED.
 
     Run by the receiver after it has actually performed the effect. Safe to
-    re-run: completing an already-COMPLETED entry is a no-op success.
+    re-run: completing an already-COMPLETED entry is a no-op success. Only
+    the packet that made the claim can complete it (digest-bound), and when
+    `claim_token` is given or `require_token` is set, only the holder of the
+    token the ACCEPT returned. (v0.3 matched on key + id alone, so any agent
+    that had seen the packet could close someone else's claim.)
     """
-    h = packet.get("handoff")
+    h = packet.get("handoff") if isinstance(packet, dict) else None
     if not isinstance(h, dict) or not h.get("idempotency_key"):
-        return _print_reject("invalid", "missing_idempotency_key",
-                             "packet must contain a 'handoff' object with an idempotency_key")
-    if not args.ledger:
-        return _print_reject("invalid", "ledger_required",
-                             "--complete requires --ledger (the claim lives there)")
+        return _reject("invalid", "missing_idempotency_key",
+                       "packet must contain a 'handoff' object with an idempotency_key")
+    if not ledger_path:
+        return _reject("invalid", "ledger_required",
+                       "--complete requires --ledger (the claim lives there)")
     key = h["idempotency_key"]
-    with LockedLedger(Path(args.ledger)) as locked:
+    with LockedLedger(Path(ledger_path)) as locked:
         ledger = locked.ledger
         if ledger.get("_corrupt"):
-            return _print_reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
+            return _reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
         entry = ledger.get(key)
-        if entry is None:
-            return _print_reject("invalid", "completion_unknown_key",
-                                 f"no ledger claim for idempotency_key '{key}'; "
-                                 f"nothing was reserved under this key")
-        if entry.get("handoff_id") not in (None, h.get("id")):
-            return _print_reject("conflicting", "completion_handoff_mismatch",
-                                 f"idempotency_key '{key}' was claimed by handoff "
-                                 f"{entry.get('handoff_id')}, not {h.get('id')}")
+        problem = _claim_problem(entry, h, claim_token, require_token)
+        if problem:
+            return problem
         if entry_state(entry) == "COMPLETED":
-            print(json.dumps({"decision": "COMPLETED", "handoff_id": h.get("id"),
-                              "trace_id": h.get("trace_id"), "idempotency_key": key,
-                              "note": "already completed; no-op"}, indent=2))
-            return 0
+            return {"decision": "COMPLETED", "handoff_id": h.get("id"),
+                    "trace_id": h.get("trace_id"), "idempotency_key": key,
+                    "note": "already completed; no-op"}
         entry["state"] = "COMPLETED"
         entry["completed_at"] = now_utc().isoformat()
         locked.dirty = True
-        print(json.dumps({"decision": "COMPLETED", "handoff_id": h.get("id"),
-                          "trace_id": h.get("trace_id"), "idempotency_key": key}, indent=2))
-        return 0
+        return {"decision": "COMPLETED", "handoff_id": h.get("id"),
+                "trace_id": h.get("trace_id"), "idempotency_key": key}
+
+
+def release(packet, ledger_path: Path | None, reserve_ttl_hours: float = 24.0,
+            force: bool = False) -> dict:
+    """Operator reconcile for an `unknown` claim whose effect is NOT on
+    record: reopen the key for redispatch. The next claim gets a higher
+    epoch, so the old holder can no longer run a fenced() effect or
+    complete. Refuses a claim still inside its TTL unless `force` (use it
+    only when you know the old holder is gone)."""
+    h = packet.get("handoff") if isinstance(packet, dict) else None
+    if not isinstance(h, dict) or not h.get("idempotency_key"):
+        return _reject("invalid", "missing_idempotency_key",
+                       "packet must contain a 'handoff' object with an idempotency_key")
+    if not ledger_path:
+        return _reject("invalid", "ledger_required", "--release requires --ledger")
+    key = h["idempotency_key"]
+    with LockedLedger(Path(ledger_path)) as locked:
+        ledger = locked.ledger
+        if ledger.get("_corrupt"):
+            return _reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
+        entry = ledger.get(key)
+        if not isinstance(entry, dict) or entry_state(entry) != "RESERVED":
+            return _reject("invalid", "release_not_reserved",
+                           f"idempotency_key '{key}' has no RESERVED claim to release")
+        claimed = parse_ts(entry.get("reserved_at") or entry.get("accepted_at") or "")
+        if claimed is not None and claimed.tzinfo is None:
+            claimed = claimed.replace(tzinfo=dt.timezone.utc)
+        fresh = claimed is not None and (now_utc() - claimed) <= dt.timedelta(hours=reserve_ttl_hours)
+        if fresh and not force:
+            return _reject("duplicate", "release_claim_fresh",
+                           f"claim on '{key}' is younger than the {reserve_ttl_hours:g}h TTL; its "
+                           f"holder may still act. Wait, or --force if you know it is gone")
+        entry["state"] = "RELEASED"
+        entry["released_at"] = now_utc().isoformat()
+        locked.dirty = True
+        return {"decision": "RELEASED", "idempotency_key": key, "epoch": entry.get("epoch", 0),
+                "note": "key reopened; the next claim gets a higher epoch"}
+
+
+class FenceError(Exception):
+    """fenced() refused: the claim is no longer this caller's to act on."""
+
+    def __init__(self, verdict: dict):
+        super().__init__(verdict["reasons"][0]["message"])
+        self.verdict = verdict
+
+
+@contextlib.contextmanager
+def fenced(packet, ledger_path, claim_token: str, complete_on_success: bool = True):
+    """Execution boundary for a non-idempotent effect:
+
+        with fenced(packet, "ledger.json", verdict["claim"]["token"]):
+            send_the_email()
+
+    The body runs under the ledger lock, and only while this exact claim is
+    still RESERVED for this token; on normal exit it is flipped to
+    COMPLETED in the same critical section. If the body raises, the claim
+    stays RESERVED (outcome unknown) and the exception propagates. Without
+    this, a slow receiver whose claim was released and redispatched would
+    perform the effect twice.
+    The lock is held for the duration of the effect, so keep it short."""
+    h = packet.get("handoff") if isinstance(packet, dict) else None
+    if not isinstance(h, dict) or not h.get("idempotency_key"):
+        raise FenceError(_reject("invalid", "missing_idempotency_key",
+                                 "packet must contain a 'handoff' object with an idempotency_key"))
+    with LockedLedger(Path(ledger_path)) as locked:
+        entry = locked.ledger.get(h["idempotency_key"])
+        problem = _claim_problem(entry, h, claim_token, require_token=True)
+        if problem is None and entry_state(entry) != "RESERVED":
+            problem = _reject("duplicate", "duplicate_idempotency_key",
+                              f"idempotency_key '{h['idempotency_key']}' is already {entry_state(entry)}")
+        if problem:
+            raise FenceError(problem)
+        yield entry.get("epoch", 0)
+        if complete_on_success:
+            entry["state"] = "COMPLETED"
+            entry["completed_at"] = now_utc().isoformat()
+            locked.dirty = True
+
+
+def exit_code(result: dict) -> int:
+    return 0 if result.get("decision") in ("ACCEPT", "COMPLETED", "RELEASED") else 2
+
+
+def load_registry(path) -> tuple[dict | None, dict | None]:
+    """Return (registry, None) or (None, reject_result)."""
+    if not path:
+        return None, None
+    try:
+        reg = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, _reject("invalid", "registry_unreadable", f"cannot read registry: {exc}")
+    if not isinstance(reg, dict) or not isinstance(reg.get("agents", {}), dict):
+        return None, _reject("invalid", "registry_malformed", "registry must be an object with an 'agents' object")
+    return reg, None
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Handoff Contract validator (packet wire format v0.1; v0.2 claim ledger)")
+        description="Handoff Contract validator (packet wire format v0.1; v0.2 claim ledger; "
+                    "v0.3 receiver policy + signatures)")
     ap.add_argument("packet", help="handoff packet JSON file")
-    ap.add_argument("--registry", help="agent registry JSON (canonical ids + aliases)")
+    ap.add_argument("--registry", help="agent registry JSON (canonical ids, aliases, keys, policy)")
     ap.add_argument("--ledger", help="idempotency ledger JSON file (created if absent)")
     ap.add_argument("--workspace", help="workspace root for artifact existence/hash checks")
     ap.add_argument("--dry-run", action="store_true",
@@ -339,53 +875,43 @@ def main(argv=None) -> int:
     ap.add_argument("--complete", action="store_true",
                     help="mark this packet's idempotency key COMPLETED in the ledger "
                          "(run after the receiver performs the effect); requires --ledger")
+    ap.add_argument("--claim-token",
+                    help="with --complete: the claim token the ACCEPT returned (binds completion "
+                         "to the claimant)")
+    ap.add_argument("--release", action="store_true",
+                    help="operator: reopen an expired RESERVED claim whose effect is NOT on record "
+                         "(the next claim gets a higher epoch); requires --ledger")
+    ap.add_argument("--force", action="store_true",
+                    help="with --release: release even inside the TTL (holder known to be gone)")
     ap.add_argument("--reserve-ttl-hours", type=float, default=24.0,
                     help="hours a RESERVED claim stays fresh before a re-presentation "
                          "flips to UNKNOWN (default: 24)")
+    ap.add_argument("--verify-evidence", action="store_true",
+                    help="require every evidence item to reference a workspace file and "
+                         "check pinned sha256 hashes (also enabled by registry policy)")
     args = ap.parse_args(argv)
 
     try:
         packet = json.loads(Path(args.packet).read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        return _print_reject("invalid", "packet_unreadable", f"cannot read packet: {exc}")
-
-    if args.complete:
-        return complete_mode(args, packet)
-
-    registry = json.loads(Path(args.registry).read_text()) if args.registry else None
-    ledger_path = Path(args.ledger) if args.ledger else None
-    workspace = Path(args.workspace) if args.workspace else None
-    h = packet.get("handoff", {}) if isinstance(packet.get("handoff"), dict) else {}
-
-    if ledger_path is not None and not args.dry_run:
-        # Atomic claim: validate and record RESERVED under one lock, so two
-        # concurrent presentations of the same key cannot both pass.
-        with LockedLedger(ledger_path) as locked:
-            ledger = locked.ledger
-            if ledger.get("_corrupt"):
-                return _print_reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
-            ok, reasons = validate(packet, registry=registry, ledger=ledger,
-                                   workspace=workspace, at=now_utc(),
-                                   reserve_ttl_hours=args.reserve_ttl_hours)
-            if ok:
-                ledger[h["idempotency_key"]] = {
-                    "state": "RESERVED",
-                    "handoff_id": h["id"],
-                    "trace_id": h["trace_id"],
-                    "from": h["from"],
-                    "to": h["to"],
-                    "reserved_at": now_utc().isoformat(),
-                }
-                locked.dirty = True
-            return _emit(ok, reasons, h)
-
-    ledger = load_ledger(ledger_path) if ledger_path else {}
-    if ledger.get("_corrupt"):
-        return _print_reject("invalid", "ledger_corrupt", "ledger file is not valid JSON")
-    ok, reasons = validate(packet, registry=registry, ledger=ledger,
-                           workspace=workspace, at=now_utc(),
-                           reserve_ttl_hours=args.reserve_ttl_hours)
-    return _emit(ok, reasons, h)
+        result = _reject("invalid", "packet_unreadable", f"cannot read packet: {exc}")
+    else:
+        if args.complete:
+            result = complete(packet, Path(args.ledger) if args.ledger else None,
+                              claim_token=args.claim_token)
+        elif args.release:
+            result = release(packet, Path(args.ledger) if args.ledger else None,
+                             reserve_ttl_hours=args.reserve_ttl_hours, force=args.force)
+        else:
+            registry, err = load_registry(args.registry)
+            result = err or check(
+                packet, registry=registry,
+                ledger_path=Path(args.ledger) if args.ledger else None,
+                workspace=Path(args.workspace) if args.workspace else None,
+                dry_run=args.dry_run, reserve_ttl_hours=args.reserve_ttl_hours,
+                verify_evidence=args.verify_evidence)
+    print(json.dumps(result, indent=2))
+    return exit_code(result)
 
 
 if __name__ == "__main__":

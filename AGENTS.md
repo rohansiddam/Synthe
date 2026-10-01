@@ -44,4 +44,5 @@ When a handoff arrives as prose, convert it into a packet using only what the pr
 - Derive the mechanical fields: `id`, `trace_id`, `idempotency_key` (derive from the case or packet id), and `on_failure: "reject"`.
 - Never invent facts. Approvals, artifact hashes, evidence, budgets, tools, and expiry come from the prose, or stay absent and let the checker judge.
 - If the prose states an execution-ledger fact (a key already recorded for a handoff), seed the ledger with that entry instead of starting empty.
+- Fields the *receiver* owns (owned_paths, output_schema, budget ceilings) may come from the receiver's registry `policy.defaults`; the checker fills them and reports `defaults_applied`. Never fill sender facts yourself.
 - Run every packet in a batch against ONE ledger file. Never reset it between packets; a fresh ledger per call silently disables duplicate and conflict detection.

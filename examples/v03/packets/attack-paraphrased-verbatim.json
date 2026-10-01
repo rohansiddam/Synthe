@@ -1,0 +1,85 @@
+{
+  "handoff": {
+    "schema_version": "0.1",
+    "id": "h-v03-0001",
+    "trace_id": "trace-v03-0001",
+    "idempotency_key": "cadros:verdict-pack:m1:rev-7",
+    "on_failure": "reject",
+    "from": "cora",
+    "to": "caddy",
+    "purpose": "Verify the M-1 verdict pack and email the summary to the district contact",
+    "inputs": {
+      "artifact_refs": [
+        {
+          "path": "input.txt",
+          "sha256": "88e8badf89fa6f261ab018cb7977a814eac0c5bae8b23f94b98588e37d10eb4b"
+        }
+      ],
+      "state_revision": "rev-7"
+    },
+    "scope": {
+      "forbidden": [
+        "publish"
+      ]
+    },
+    "authority": {
+      "allowed_tools": [
+        "read_repo",
+        "run_tests",
+        "gmail_send"
+      ],
+      "approval_required_for": [
+        "send_email"
+      ],
+      "approvals": [
+        {
+          "action": "send_email",
+          "approver": "rohan",
+          "expires_at": "2999-01-01T00:00:00Z",
+          "kid": "rohan-test-1",
+          "sig": "lO9pHBN86DgdSTUzmJVoeQrY4mUE9Mp1oOCCp6qYyrRru-6WZoJ4NvZ9IcLzexevi2ZVd1evtqVqZnnen15qCQ"
+        }
+      ]
+    },
+    "planned_actions": [
+      {
+        "name": "verify_pack",
+        "tool": "run_tests",
+        "est_tokens": 4000,
+        "est_minutes": 5
+      },
+      {
+        "name": "send_email",
+        "tool": "gmail_send",
+        "est_tokens": 300,
+        "est_minutes": 1
+      }
+    ],
+    "acceptance": {
+      "expires_at": "2999-01-01T00:00:00Z",
+      "required_evidence": [
+        "verbatim_quote",
+        "test_output"
+      ],
+      "evidence": [
+        {
+          "kind": "verbatim_quote",
+          "ref": "evidence/quote.md#m1-u-12",
+          "sha256": "1846b703233e9fe182f5d9378cf30e5e137600eb8317a58dc38eb5416feace78",
+          "verbatim": true
+        },
+        {
+          "kind": "test_output",
+          "ref": "evidence/tests.txt",
+          "sha256": "fbfb53aaf6117da6deb4a6a4b3d71a00ee8ac943050cde44ede6b09520728acb"
+        }
+      ]
+    }
+  },
+  "signature": {
+    "signer": "cora",
+    "kid": "cora-test-1",
+    "alg": "Ed25519",
+    "sig": "EpDh8__MNLearQhAgebtuyjA-wbdX4iOcJjnpF5zKi-cLJEf5FRtVB4guLzXpJWfYFwT2A24w_E5vAQ9NVCYBA"
+  }
+}
