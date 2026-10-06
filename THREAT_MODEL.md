@@ -1,4 +1,4 @@
-# Synthe threat model (v0.3)
+# Synthe threat model (v0.5)
 
 One page, so design arguments start from the same place.
 
@@ -38,6 +38,21 @@ A signature proves **who said it**. It never proves **that it's safe**.
 | Paraphrased "verbatim" quote | verbatim kinds must pin source bytes | `evidence_not_verbatim`, `verbatim_evidence_unpinned` |
 | Undeclared side effects | policy can require `planned_actions` | `planned_actions_missing` |
 | Checker silently skips a check | fail closed when a policy expects a pin but no workspace exists | `workspace_required` |
+
+## v0.4–v0.5: effect targets, approvals arriving later, and concurrent work
+
+| Threat | Mechanism | Reason code |
+|---|---|---|
+| Sender retargets an approved action (another branch, another recipient) | the approval can pin `params`; they are inside the approver's signature and must equal the planned action's | `approval_params_mismatch`, `approval_signature_invalid` |
+| An approval delivered on its own is forged or meant for another handoff | a detached approval is the same signed object, bound to `idempotency_key`, `from`, `to`, checked like an embedded one | `approval_signature_invalid`, `approver_not_trusted` |
+| "Approve later" used to skip a bad approval | deferral only covers a *missing* approval, only when the caller asks for it; a present but bad one still rejects | `approval_params_mismatch`, `approval_expired`, ... |
+| Downstream work commits before the work it depends on | `depends_on` is signed by the sender; `fenced()`, `fenced_effect()` and `complete()` refuse until every upstream is `COMPLETED` | `dependency_incomplete`, `dependency_unknown` |
+| Handoffs that wait on each other forever | a claim that would close a wait-for cycle through live claims is refused | `dependency_cycle` |
+| Two receivers edit the same files at once | `exclusive_paths`: overlapping `owned_paths` on live claims are refused; overlap is judged conservatively | `claim_conflict` |
+| One effect of a multi-effect handoff performed twice | `fenced_effect()` records each named effect; an executed or unconfirmed one is refused | `effect_already_executed`, `effect_outcome_unknown` |
+
+Limits: deferral moves the approval check to whoever performs the effect; if that party does not
+check, nothing does. `depends_on` holds back only effects run inside the fence.
 
 ## Out of scope: what it does NOT stop (be honest about these)
 

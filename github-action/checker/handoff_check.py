@@ -15,6 +15,12 @@ the TTL is `unknown`: the receiver may have crashed before or after the
 effect, so reconcile against its effect receipt before redispatch. Ledger
 writes are atomic: an flock-serialized read-check-write critical section and
 a temp-file + os.replace save, so concurrent invocations cannot both pass.
+
+v0.5 wait-for: `handoff.depends_on` lists idempotency keys that must be
+COMPLETED before this handoff's effect may commit (checked inside fenced(),
+fenced_effect() and complete(), under the ledger lock). A receiver policy
+with `exclusive_paths` refuses a second live claim whose owned_paths may
+overlap one already held on that receiver (`claim_conflict`).
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -159,6 +166,72 @@ def resolve_in_workspace(workspace: Path, rel: str) -> Path | None:
     return target
 
 
+def glob_match(pattern: str, path: str) -> bool:
+    """`**` crosses directories; `*` and `?` stay within one segment."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.fullmatch(out, path) is not None
+
+
+def _glob_tokens(pattern: str) -> list:
+    """(is_wildcard, text) tokens, read exactly the way glob_match reads them."""
+    out, i = [], 0
+    while i < len(pattern):
+        for wild in ("**/", "**", "*", "?"):
+            if pattern.startswith(wild, i):
+                out.append((True, wild))
+                i += len(wild)
+                break
+        else:
+            out.append((False, pattern[i]))
+            i += 1
+    return out
+
+
+def globs_may_overlap(a: str, b: str) -> bool:
+    """Could one path match both globs? Conservative: False only when no path
+    can. Any path matching a glob starts with its literal prefix (the text
+    before its first wildcard) and ends with its literal suffix (the text
+    after its last), so two globs whose prefixes, or whose suffixes, are not
+    compatible cannot share a path; everything else counts as overlapping.
+    A wildcard-free glob is one path and is matched exactly. Compared
+    case-insensitively, because a case-insensitive filesystem would collide."""
+    a, b = a.casefold(), b.casefold()
+    ta, tb = _glob_tokens(a), _glob_tokens(b)
+    wild_a, wild_b = any(w for w, _ in ta), any(w for w, _ in tb)
+    if not wild_a and not wild_b:
+        return a == b
+    if not wild_a:
+        return glob_match(b, a)
+    if not wild_b:
+        return glob_match(a, b)
+
+    def ends(tokens):
+        head, tail = [], []
+        for wild, text in tokens:
+            if wild:
+                break
+            head.append(text)
+        for wild, text in reversed(tokens):
+            if wild:
+                break
+            tail.append(text)
+        return "".join(head), "".join(reversed(tail))
+
+    (pa, sa), (pb, sb) = ends(ta), ends(tb)
+    return (pa.startswith(pb) or pb.startswith(pa)) and (sa.endswith(sb) or sb.endswith(sa))
+
+
 def parse_utc(value) -> tuple[dt.datetime | None, str | None]:
     """Parse an ISO 8601 timestamp that carries an explicit UTC offset.
     Returns (datetime, None) or (None, problem). Naive timestamps are rejected
@@ -171,10 +244,10 @@ def parse_utc(value) -> tuple[dt.datetime | None, str | None]:
     return ts, None
 
 
-_LIST_SETS = ("forbidden", "approval_required_for")       # restrictions: union
+_LIST_SETS = ("forbidden", "approval_required_for", "forbidden_paths")  # restrictions: union
 _LIST_CEILINGS = ("allowed_tools", "trusted_approvers")    # grants: intersection
 _FLAGS = ("require_signatures", "require_signed_approvals", "verify_evidence",
-          "require_planned_actions")
+          "require_planned_actions", "exclusive_paths")
 
 
 def receiver_policy(registry: dict | None, receiver: str) -> dict | None:
@@ -290,6 +363,11 @@ def _shape_errors(h: dict) -> list:
         return good
 
     scope, auth, acc, inputs = h["scope"], h["authority"], h["acceptance"], h["inputs"]
+    deps = h.get("depends_on")
+    if deps is not None and (not isinstance(deps, list) or
+                             not all(isinstance(d, str) and d for d in deps)):
+        errs.append(("malformed:depends_on", "depends_on must be a list of idempotency keys "
+                                             "(non-empty strings)"))
     str_list(scope.get("forbidden"), "scope.forbidden")
     str_list(scope.get("owned_paths"), "scope.owned_paths")
     str_list(auth.get("allowed_tools"), "authority.allowed_tools")
@@ -305,7 +383,11 @@ def _shape_errors(h: dict) -> list:
             v = act.get(k)
             if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0):
                 errs.append((f"malformed:planned_actions[{i}].{k}", f"{k} must be a non-negative number"))
-    obj_list(auth.get("approvals"), "authority.approvals", ["action", "approver"])
+        if act.get("params") is not None and not isinstance(act.get("params"), dict):
+            errs.append((f"malformed:planned_actions[{i}].params", "params must be an object"))
+    for i, appr in enumerate(obj_list(auth.get("approvals"), "authority.approvals", ["action", "approver"])):
+        if appr.get("params") is not None and not isinstance(appr.get("params"), dict):
+            errs.append((f"malformed:authority.approvals[{i}].params", "params must be an object"))
     for i, ev in enumerate(obj_list(acc.get("evidence"), "acceptance.evidence", ["kind"])):
         if ev.get("sha256") is not None and not _is_sha256(ev.get("sha256")):
             errs.append((f"bad_sha256:acceptance.evidence[{i}]",
@@ -404,10 +486,99 @@ def _approval_ok(name: str, candidates: list, h: dict, registry, policy, at) -> 
     return problems
 
 
+def _dependency_cycle(ledger: dict, key: str, deps) -> list | None:
+    """A wait-for cycle that runs through this handoff: key -> dep -> ... ->
+    key, following the depends_on recorded on live (RESERVED) claims. No
+    handoff in such a cycle could ever commit, so it is refused at claim."""
+    deps = [d for d in deps or [] if isinstance(d, str)]
+    if key in deps:
+        return [key, key]
+    stack, seen = [(d, [key, d]) for d in dict.fromkeys(deps)], set()
+    while stack:
+        node, path = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        entry = ledger.get(node)
+        if not isinstance(entry, dict) or entry_state(entry) != "RESERVED":
+            continue
+        for nxt in entry.get("depends_on") or []:
+            if nxt == key:
+                return path + [key]
+            if isinstance(nxt, str) and nxt not in seen:
+                stack.append((nxt, path + [nxt]))
+    return None
+
+
+def _path_conflicts(ledger: dict, h: dict, key: str) -> list:
+    """Other live claims on h's receiver whose owned_paths may overlap h's
+    (v0.5 exclusive_paths): [(key, entry, [(mine, theirs), ...])]. A claim
+    recorded without its paths (before v0.5) is assumed to overlap."""
+    mine = [p for p in (h.get("scope") or {}).get("owned_paths") or [] if isinstance(p, str)]
+    out: list = []
+    if not mine:
+        return out
+    for other, entry in ledger.items():
+        if other == key or not isinstance(entry, dict) or entry_state(entry) != "RESERVED":
+            continue
+        if entry.get("to") not in (None, h.get("to")):
+            continue
+        theirs = entry.get("owned_paths")
+        if not isinstance(theirs, list):
+            pairs = [(mine[0], "(paths not recorded)")]
+        else:
+            pairs = [(a, b) for a in mine for b in theirs
+                     if isinstance(b, str) and globs_may_overlap(a, b)]
+        if pairs:
+            out.append((other, entry, pairs))
+    return out
+
+
+def _dependency_problem(ledger: dict, h: dict, entry: dict | None = None):
+    """Why h may not commit yet (v0.5 wait-for), or None: every key in
+    depends_on (the packet's, and what its claim recorded) must be COMPLETED
+    in this same ledger. Checked inside the fence, so the dependency check
+    and the effect are one atomic step."""
+    deps = list(h.get("depends_on") or []) + list((entry or {}).get("depends_on") or [])
+    if not all(isinstance(d, str) and d for d in deps):
+        return _reject("invalid", "malformed:depends_on",
+                       "depends_on must be a list of idempotency keys (non-empty strings)")
+    pending, unknown = [], []
+    for d in dict.fromkeys(deps):
+        dep = ledger.get(d)
+        if not isinstance(dep, dict):
+            unknown.append(d)
+        elif entry_state(dep) != "COMPLETED":
+            pending.append(f"{d} ({entry_state(dep)})")
+    reasons = []
+    if pending:
+        reasons.append({"state": "blocked", "code": "dependency_incomplete",
+                        "message": f"waiting for upstream handoff(s) to complete: {', '.join(pending)}; "
+                                   f"commit again once they are COMPLETED"})
+    if unknown:
+        reasons.append({"state": "blocked", "code": "dependency_unknown",
+                        "message": f"depends_on names key(s) this ledger has never claimed: "
+                                   f"{', '.join(unknown)}; the upstream handoff must be claimed and "
+                                   f"completed in the same ledger first"})
+    return {"decision": "REJECT", "state": "blocked", "reasons": reasons} if reasons else None
+
+
+UNPLANNED_APPROVAL_PINS = ("commit",)  # params an approval may pin that the plan cannot
+
+
 def validate(packet: dict, *, registry: dict | None, ledger: dict,
              workspace: Path | None, at: dt.datetime,
              reserve_ttl_hours: float = 24.0, info: dict | None = None,
-             verify_evidence: bool = False) -> tuple[bool, list]:
+             verify_evidence: bool = False, extra_approvals: list | None = None,
+             defer_approvals=None) -> tuple[bool, list]:
+    """Validate one packet (sections 6-7 of SPEC.md).
+
+    v0.5, both default off: `extra_approvals` are signed approvals for this
+    handoff that arrived outside the packet (detached), checked exactly like
+    embedded ones; `defer_approvals` names planned actions whose approval may
+    still be missing (whatever performs them must check it at commit time),
+    so a missing approval for them is recorded in info["approvals_deferred"]
+    instead of failing."""
     reasons: list = []
     info = {} if info is None else info
     h_signed = packet.get("handoff") if isinstance(packet, dict) else None
@@ -420,6 +591,7 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
     applied = apply_receiver_defaults(h, policy)
     if applied:
         info["defaults_applied"] = applied
+    info["_effective"] = h  # defaults applied; internal, never part of a verdict
 
     # 1. structural / required fields
     for field in REQUIRED:
@@ -517,6 +689,23 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
                      f"effect, so reconcile against the receiver's effect receipt before redispatch",
                      reasons)
 
+    # 3b. (v0.5) wait-for cycles and exclusive paths. Both read the ledger, so
+    #     check() runs them under its lock, atomically with the claim itself.
+    #     Unmet dependencies do not block a claim (the receiver may work
+    #     ahead); they block the commit (fenced / fenced_effect / complete).
+    cycle = _dependency_cycle(ledger, key, h.get("depends_on"))
+    if cycle:
+        fail("invalid", "dependency_cycle",
+             f"depends_on forms a wait-for cycle ({' -> '.join(cycle)}); no handoff in it "
+             f"could ever commit", reasons)
+    if policy and policy.get("exclusive_paths"):
+        for other, entry, pairs in _path_conflicts(ledger, h, key):
+            shown = ", ".join(f"{a} ~ {b}" for a, b in pairs[:5])
+            fail("blocked", "claim_conflict",
+                 f"receiver '{h['to']}' requires exclusive paths and handoff {entry.get('handoff_id')} "
+                 f"(key {other}) holds a live claim that may touch the same files ({shown}); "
+                 f"claim again once it completes or is released", reasons)
+
     # 4. freshness
     exp, why = parse_utc(acc["expires_at"])
     if exp is None:
@@ -535,8 +724,11 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         fail("blocked", "authority_exceeds_receiver_policy",
              f"packet grants tools the receiver never allows: {sorted(allowed - ceiling_tools)}", reasons)
     approvals_by_action: dict = {}
-    for a in auth.get("approvals", []) or []:
+    # Detached approvals count only when signed: anyone could write an unsigned one.
+    detached = [a for a in extra_approvals or [] if isinstance(a, dict) and a.get("sig") and a.get("action")]
+    for a in (auth.get("approvals", []) or []) + detached:
         approvals_by_action.setdefault(a["action"], []).append(a)
+    defer = set(defer_approvals or ())
     est = {"tokens": 0.0, "usd": 0.0, "minutes": 0.0}
     for act in h.get("planned_actions", []) or []:
         name, tool = act["name"], act["tool"]
@@ -550,11 +742,30 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         if name in needs_approval or tool in needs_approval:
             cands = approvals_by_action.get(name, []) + (
                 approvals_by_action.get(tool, []) if tool != name else [])
+            # v0.4: an approval that pins params covers only a plan with those
+            # params (the sender cannot retarget an approved action).
+            planned_params = act.get("params") if isinstance(act.get("params"), dict) else {}
+            # `commit` can be pinned by the approver but never by the sender's plan (the
+            # commit does not exist yet); the effect executor enforces it at commit time.
+            fitting = [a for a in cands if not isinstance(a.get("params"), dict)
+                       or all(k in UNPLANNED_APPROVAL_PINS or planned_params.get(k) == v
+                              for k, v in a["params"].items())]
+            problems: list = []
             if not cands:
-                fail("blocked", "approval_missing", f"action '{name}' needs approval; none recorded", reasons)
+                problems = [("approval_missing", f"action '{name}' needs approval; none recorded")]
+            elif not fitting:
+                problems = [("approval_params_mismatch",
+                             f"approvals for '{name}' pin params the plan does not have "
+                             f"(approved {cands[0].get('params')}, planned {planned_params})")]
             else:
-                for code, msg in _approval_ok(name, cands, h, registry, policy, at):
-                    fail("blocked", code, msg, reasons)
+                problems = _approval_ok(name, fitting, h, registry, policy, at)
+            if problems and not cands and name in defer:
+                info.setdefault("approvals_deferred", []).append(name)
+                problems = []
+            if problems:
+                info.setdefault("approval_problems", {})[name] = [c for c, _ in problems]
+            for code, msg in problems:
+                fail("blocked", code, msg, reasons)
         for k in est:
             est[k] += float(act.get(f"est_{k}", 0) or 0)
     ceiling_budget = pol.get("budget") or {}
@@ -645,22 +856,26 @@ def _result(ok: bool, reasons: list, h: dict, info: dict) -> dict:
         out["defaults_applied"] = info["defaults_applied"]
     if info.get("signature") == "verified":
         out["signature"] = "verified"
+    if info.get("approvals_deferred"):  # v0.5, only when the caller deferred them
+        out["approvals_deferred"] = list(info["approvals_deferred"])
     return out
 
 
 def check(packet, *, registry: dict | None, ledger_path: Path | None,
           workspace: Path | None, dry_run: bool = False,
-          reserve_ttl_hours: float = 24.0, verify_evidence: bool = False) -> dict:
+          reserve_ttl_hours: float = 24.0, verify_evidence: bool = False,
+          extra_approvals: list | None = None, defer_approvals=None) -> dict:
     """Validate a packet and (unless dry_run) atomically record a RESERVED
-    claim on ACCEPT. Returns the verdict as a dict. Used by the CLI and the
-    GitHub Action so every entry point shares one code path."""
+    claim on ACCEPT. Returns the verdict as a dict. Used by the CLI, the GitHub
+    Action and every integration, so every entry point shares one code path."""
     if not isinstance(packet, dict):
         return _reject("invalid", "missing_handoff", "packet must be a JSON object with a 'handoff' object")
     h = packet.get("handoff") if isinstance(packet.get("handoff"), dict) else {}
     info: dict = {}
     kwargs = dict(registry=registry, workspace=workspace, at=now_utc(),
                   reserve_ttl_hours=reserve_ttl_hours, info=info,
-                  verify_evidence=verify_evidence)
+                  verify_evidence=verify_evidence, extra_approvals=extra_approvals,
+                  defer_approvals=defer_approvals)
     if ledger_path is not None and not dry_run:
         # Atomic claim: validate and record RESERVED under one lock, so two
         # concurrent presentations of the same key cannot both pass.
@@ -674,10 +889,14 @@ def check(packet, *, registry: dict | None, ledger_path: Path | None,
             # The claim is bound to this exact packet (digest) and to whoever
             # holds the token returned below. `epoch` is the fencing number:
             # it rises every time the key is re-claimed after a release, so a
-            # stale holder's fenced() effect is refused.
+            # stale holder's fenced() effect is refused (found by model checking).
             prev = ledger.get(h["idempotency_key"])
             epoch = (prev.get("epoch", 0) if isinstance(prev, dict) else 0) + 1
-            token = secrets.token_urlsafe(24)
+            # Never starts with "-": argparse reads a leading "-" value as an option, so a
+            # token like "-x3k..." (1 in 64 urlsafe tokens) broke `--claim-token TOKEN` in
+            # every CLI that takes it, and made test_cli_push_and_receipts_verify flaky.
+            token = "ct_" + secrets.token_urlsafe(24)
+            effective = info.get("_effective") or h
             ledger[h["idempotency_key"]] = {
                 "state": "RESERVED",
                 "handoff_id": h["id"],
@@ -689,7 +908,14 @@ def check(packet, *, registry: dict | None, ledger_path: Path | None,
                 "epoch": epoch,
                 "packet_sha256": handoff_digest(h),
                 "claim_token_sha256": _token_hash(token),
+                # v0.5: what this claim may touch (receiver defaults applied),
+                # for exclusive_paths, and what it waits for.
+                "owned_paths": list((effective.get("scope") or {}).get("owned_paths") or []),
             }
+            if h.get("depends_on"):
+                ledger[h["idempotency_key"]]["depends_on"] = list(h["depends_on"])
+            if info.get("approvals_deferred"):
+                ledger[h["idempotency_key"]]["approvals_deferred"] = list(info["approvals_deferred"])
             locked.dirty = True
             out = _result(ok, reasons, h, info)
             out["claim"] = {"epoch": epoch, "token": token}
@@ -738,7 +964,8 @@ def complete(packet, ledger_path: Path | None, claim_token: str | None = None,
     the packet that made the claim can complete it (digest-bound), and when
     `claim_token` is given or `require_token` is set, only the holder of the
     token the ACCEPT returned. (v0.3 matched on key + id alone, so any agent
-    that had seen the packet could close someone else's claim.)
+    that had seen the packet could close someone else's claim; a model check
+    found it.)
     """
     h = packet.get("handoff") if isinstance(packet, dict) else None
     if not isinstance(h, dict) or not h.get("idempotency_key"):
@@ -760,6 +987,9 @@ def complete(packet, ledger_path: Path | None, claim_token: str | None = None,
             return {"decision": "COMPLETED", "handoff_id": h.get("id"),
                     "trace_id": h.get("trace_id"), "idempotency_key": key,
                     "note": "already completed; no-op"}
+        problem = _dependency_problem(ledger, h, entry)
+        if problem:
+            return problem
         entry["state"] = "COMPLETED"
         entry["completed_at"] = now_utc().isoformat()
         locked.dirty = True
@@ -822,10 +1052,11 @@ def fenced(packet, ledger_path, claim_token: str, complete_on_success: bool = Tr
     The body runs under the ledger lock, and only while this exact claim is
     still RESERVED for this token; on normal exit it is flipped to
     COMPLETED in the same critical section. If the body raises, the claim
-    stays RESERVED (outcome unknown) and the exception propagates. Without
-    this, a slow receiver whose claim was released and redispatched would
-    perform the effect twice.
-    The lock is held for the duration of the effect, so keep it short."""
+    stays RESERVED (outcome unknown) and the exception propagates. Model
+    checking showed that without this, a slow receiver whose claim was
+    released and redispatched performs the effect twice.
+    The lock is held for the duration of the effect, so keep it short.
+    v0.5: refused while any depends_on key is not COMPLETED."""
     h = packet.get("handoff") if isinstance(packet, dict) else None
     if not isinstance(h, dict) or not h.get("idempotency_key"):
         raise FenceError(_reject("invalid", "missing_idempotency_key",
@@ -836,6 +1067,8 @@ def fenced(packet, ledger_path, claim_token: str, complete_on_success: bool = Tr
         if problem is None and entry_state(entry) != "RESERVED":
             problem = _reject("duplicate", "duplicate_idempotency_key",
                               f"idempotency_key '{h['idempotency_key']}' is already {entry_state(entry)}")
+        if problem is None:
+            problem = _dependency_problem(locked.ledger, h, entry)
         if problem:
             raise FenceError(problem)
         yield entry.get("epoch", 0)
@@ -843,6 +1076,54 @@ def fenced(packet, ledger_path, claim_token: str, complete_on_success: bool = Tr
             entry["state"] = "COMPLETED"
             entry["completed_at"] = now_utc().isoformat()
             locked.dirty = True
+
+
+@contextlib.contextmanager
+def fenced_effect(packet, ledger_path, claim_token: str, action: str, final_actions=()):
+    """fenced() for one named effect of a multi-effect handoff (v0.4, for an
+    effect executor). Yields a dict the body fills with what it observed; on normal
+    exit that record is stored under entry["effects"][action] in the same
+    critical section, and the claim flips to COMPLETED once every action in
+    `final_actions` has an EXECUTED record. Refuses (FenceError) when the
+    claim is not this token's, not RESERVED, or `action` was already
+    executed or left with an unknown outcome, or (v0.5) while any
+    depends_on key is not COMPLETED. If the body sets record["state"] to
+    something other than EXECUTED, it is stored as-is (e.g. UNCONFIRMED)
+    and the claim stays RESERVED."""
+    h = packet.get("handoff") if isinstance(packet, dict) else None
+    if not isinstance(h, dict) or not h.get("idempotency_key"):
+        raise FenceError(_reject("invalid", "missing_idempotency_key",
+                                 "packet must contain a 'handoff' object with an idempotency_key"))
+    with LockedLedger(Path(ledger_path)) as locked:
+        if locked.ledger.get("_corrupt"):
+            raise FenceError(_reject("invalid", "ledger_corrupt", "ledger file is not valid JSON"))
+        entry = locked.ledger.get(h["idempotency_key"])
+        problem = _claim_problem(entry, h, claim_token, require_token=True)
+        if problem is None and entry_state(entry) != "RESERVED":
+            problem = _reject("duplicate", "duplicate_idempotency_key",
+                              f"idempotency_key '{h['idempotency_key']}' is already {entry_state(entry)}")
+        prior = (entry.get("effects") or {}).get(action) if problem is None else None
+        if prior is not None and prior.get("state") == "EXECUTED":
+            problem = _reject("duplicate", "effect_already_executed",
+                              f"effect '{action}' already executed for this handoff "
+                              f"(receipt {prior.get('receipt_seq')})")
+        elif prior is not None:
+            problem = _reject("unknown", "effect_outcome_unknown",
+                              f"effect '{action}' was attempted with outcome {prior.get('state')}; "
+                              f"reconcile before retrying")
+        if problem is None:
+            problem = _dependency_problem(locked.ledger, h, entry)
+        if problem:
+            raise FenceError(problem)
+        record: dict = {"state": "EXECUTED", "epoch": entry.get("epoch", 0)}
+        yield record
+        record.setdefault("at", now_utc().isoformat())
+        entry.setdefault("effects", {})[action] = record
+        done = {a for a, r in entry["effects"].items() if r.get("state") == "EXECUTED"}
+        if final_actions and set(final_actions) <= done:
+            entry["state"] = "COMPLETED"
+            entry["completed_at"] = now_utc().isoformat()
+        locked.dirty = True
 
 
 def exit_code(result: dict) -> int:

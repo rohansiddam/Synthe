@@ -1,12 +1,14 @@
-# Handoff Contract v0.3
+# Handoff Contract v0.5
 
 Every agent-to-agent handoff is an API boundary. The receiver validates the
 handoff *before* it starts work, and the checker fails closed: anything it
 cannot verify is a REJECT with a reason, never a silent pass.
 
-- Packet wire format: `schema_version: "0.1"` (v0.3 fields are additive).
+- Packet wire format: `schema_version: "0.1"` (v0.3–v0.5 fields are additive).
 - Ledger semantics: v0.2 claim lifecycle.
 - Trust layer: v0.3 receiver policy, signatures, evidence pinning.
+- Effects: v0.4 approvals that pin effect params; v0.5 detached and deferred approvals (section 5).
+- Concurrency: v0.5 wait-for dependencies (`depends_on`) and exclusive paths (section 8).
 - Machine-readable shape: [`schema/handoff.schema.json`](schema/handoff.schema.json).
 
 ## 1. Roles
@@ -52,7 +54,8 @@ approval or a tool.
 | `authority.budget` | yes* | numeric `tokens`, `usd`, `minutes` |
 | `authority.approval_required_for` | yes* | actions/tools that need an approval first (may be empty) |
 | `authority.approvals[]` | no | `{action, approver, expires_at?, kid?, sig?}` |
-| `planned_actions[]` | policy | `{name, tool, est_tokens?, est_usd?, est_minutes?}` |
+| `planned_actions[]` | policy | `{name, tool, params?, est_tokens?, est_usd?, est_minutes?}`; v0.4: `params` are the effect's target (for example a branch or a recipient), signed by the sender |
+| `depends_on[]` | no | v0.5: idempotency keys of upstream handoffs that must be `COMPLETED` (same ledger) before this handoff's effects may commit |
 | `acceptance.output_schema` | yes* | what the receiver must produce |
 | `acceptance.required_evidence` | yes* | evidence kinds that count as "done" |
 | `acceptance.evidence[]` | no | `{kind, ref?, sha256?, verbatim?}` |
@@ -93,6 +96,8 @@ sign with, and what each receiver will accept.
 | `require_signatures` | flag | unsigned packets → `signature_missing` |
 | `require_signed_approvals` | flag | unsigned approvals → `approval_unsigned` |
 | `require_planned_actions` | flag | no planned actions → `planned_actions_missing` |
+| `forbidden_paths` | list | v0.4: path globs no effect may touch; unioned across policy layers. The checker merges it; whatever performs a file-changing effect enforces it on every touched path |
+| `exclusive_paths` | flag | v0.5: a second live claim on this receiver whose `owned_paths` may overlap one already held → `claim_conflict` (section 8) |
 | `verify_evidence` | flag | evidence pinning (section 7); also `--verify-evidence` |
 | `defaults` | fill | receiver-owned fields filled when the sender left them out |
 
@@ -116,6 +121,20 @@ bytes never change.
   `signer` must equal `handoff.from`, and the key must be in `agents.<from>.keys`.
 - **Approval signature** signs `"synthe/approval-signature/v1\n" + canonical({action, approver, expires_at, idempotency_key, from, to})`.
   That binds an approval to exactly one handoff, so it can't be replayed onto another.
+  v0.4: an approval may carry `params`; they are added to the signed object, so v0.3 approvals
+  without `params` verify unchanged. An approval whose params differ from the planned action's →
+  `approval_params_mismatch` (the sender cannot retarget an approved action). An approval without
+  `params` covers the action as in v0.3.
+- **Detached approvals (v0.5).** The same signed approval may arrive apart from the packet, so the
+  packet a claim is bound to never changes. It carries `idempotency_key`, `from` and `to` in the
+  clear and is checked exactly like an embedded one (`check(..., extra_approvals=[...])`). An
+  unsigned detached approval never counts.
+- **Deferred approvals (v0.5).** A caller that will check an approval itself at commit time may
+  name the action in `defer_approvals`: a *missing* approval is then recorded in the verdict's
+  `approvals_deferred` instead of rejecting; a present but bad approval still rejects. Off by
+  default, so default verdicts are unchanged.
+- **Receipt signature (v0.4)** signs `"synthe/effect-receipt/v1\n" + canonical(receipt without sig)`,
+  domain-separated from packets and approvals.
 - Order: approvers sign first, then the sender signs. The sender's signature
   covers the approvals list.
 
@@ -129,7 +148,11 @@ Receiver defaults are applied to a copy first. Then:
    non-negative numbers, and `planned_actions` if the policy requires them. *If this step fails,
    checking stops here.*
 2. **Identity.** `from`/`to` exist in the registry and are canonical, and the packet signature verifies.
-3. **Duplication.** The idempotency key is looked up in the ledger (section 8).
+3. **Duplication and conflicts.** The idempotency key is looked up in the ledger (section 8). A
+   `depends_on` list that closes a wait-for cycle through live claims is `dependency_cycle`; under
+   `exclusive_paths`, `owned_paths` that may overlap another live claim on the receiver are
+   `claim_conflict`. Unmet dependencies do **not** fail admission: the receiver may claim and work
+   ahead, and the commit waits (section 8).
 4. **Freshness.** `acceptance.expires_at` must be parseable, offset-aware and in the future.
 5. **Authority.** Planned actions are checked against tools, forbidden actions, approvals and budgets, with the
    receiver policy as a ceiling.
@@ -185,6 +208,32 @@ if the old holder can no longer act, so run non-idempotent effects inside
 `fenced(packet, ledger, token)`. It executes the effect under the ledger lock only while
 that exact claim is still `RESERVED`, and completes it atomically on success. Without
 fencing, release-and-redispatch lets a slow receiver perform the effect twice.
+`fenced_effect(packet, ledger, token, action)` (v0.4) does the same for one named effect of a
+multi-effect handoff and records it under `ledger[key].effects[action]`. An effect already
+recorded `EXECUTED` is refused with `effect_already_executed`; one that started but whose outcome
+was never confirmed is refused with `effect_outcome_unknown` until an operator reconciles it.
+
+**Wait-for dependencies (v0.5).** `depends_on` lists the idempotency keys of upstream
+handoffs. It is a sender fact inside the signed handoff, and the claim is bound to the
+packet digest, so neither a relay nor the claimant can drop it. At commit time
+(`fenced()`, `fenced_effect()` and `complete()`, all under the ledger lock), every
+listed key must be `COMPLETED` in the same ledger: a key in any other state (`RESERVED`,
+`RELEASED`) → `dependency_incomplete`; a key the ledger has never claimed →
+`dependency_unknown`. Both are `blocked`, and neither consumes the claim; commit again
+once the upstream completes. Only an effect run inside the fence is actually held back; for
+an effect performed outside it, a refused `complete()` only keeps the ledger from recording
+the handoff as done before its upstream. The claim records `depends_on`, so a packet that
+would close a wait-for cycle through live claims is refused at admission (`dependency_cycle`).
+
+**Exclusive paths (v0.5).** Every claim records its effective `scope.owned_paths`
+(receiver defaults applied). When the receiver's policy sets `exclusive_paths`, a claim
+whose paths may overlap those of another live (`RESERVED`) claim on the same receiver is
+refused with `claim_conflict` (`blocked`) until that claim completes or is released.
+Overlap is decided conservatively: two globs are treated as disjoint only when their
+literal prefixes (the text before the first wildcard) or their literal suffixes (the text
+after the last) rule out a common path; a glob without wildcards is matched exactly;
+comparison is case-insensitive. A live claim recorded before v0.5 (no paths) counts as
+overlapping.
 
 ## 9. Failure states
 
@@ -194,7 +243,7 @@ fencing, release-and-redispatch lets a slow receiver perform the effect twice.
 | `incomplete` | evidence or artifact missing | sender supplies it |
 | `stale` | expired, or artifact/evidence bytes changed | sender refreshes |
 | `conflicting` | key already completed by a *different* handoff | human resolves |
-| `blocked` | authority, policy, approval or budget stops it | owner/approver |
+| `blocked` | authority, policy, approval or budget stops it; or (v0.5) an upstream dependency or a conflicting live claim | owner/approver; or wait for the other work |
 | `duplicate` | key already claimed or completed | nobody: do not run again |
 | `unknown` | claim never completed past TTL | operator reconciles |
 | `retryable` | reserved for transient failures | runner retries within budget |
@@ -211,13 +260,14 @@ fencing, release-and-redispatch lets a slow receiver perform the effect twice.
 `workspace_required`, `packet_unreadable`, `registry_unreadable`,
 `registry_malformed`, `ledger_corrupt`, `ledger_required`,
 `missing_idempotency_key`, `completion_unknown_key`, `claim_token_required`,
-`release_not_reserved`
+`release_not_reserved`, `dependency_cycle` (v0.5; `malformed:depends_on` is a `malformed:<f>`)
 
 **blocked:** `tool_not_allowed`, `tool_not_allowed_by_receiver`,
 `forbidden_action`, `approval_missing`, `approval_expired`,
 `approval_expires_invalid`, `approver_not_trusted`, `approval_unsigned`,
 `approval_signature_invalid`, `authority_exceeds_receiver_policy`,
-`budget_exceeded`
+`budget_exceeded`, `approval_params_mismatch` (v0.4), `dependency_incomplete`,
+`dependency_unknown`, `claim_conflict` (v0.5)
 
 **incomplete:** `artifact_missing`, `evidence_missing`,
 `evidence_unreferenced`, `evidence_ref_missing`
@@ -226,7 +276,8 @@ fencing, release-and-redispatch lets a slow receiver perform the effect twice.
 
 **duplicate / conflicting / unknown:** `idempotency_key_reserved`,
 `duplicate_idempotency_key`, `completion_handoff_mismatch`, `completion_packet_mismatch`,
-`claim_token_invalid`, `release_claim_fresh`, `unknown_outcome`
+`claim_token_invalid`, `release_claim_fresh`, `unknown_outcome`, `effect_already_executed` (v0.4,
+duplicate), `effect_outcome_unknown` (v0.4, unknown)
 
 ## 11. Entry points (one code path)
 
@@ -244,7 +295,7 @@ The operator fixes the registry, ledger and workspace; the agent supplies only t
 - Fill only receiver-owned fields, and only from the receiver's policy.
 - Run `--complete` only after the effect has actually happened.
 
-## 13. Non-goals (v0.3)
+## 13. Non-goals (v0.5)
 
 The checker makes no semantic judgment of deliverables, does not fetch URLs, and has no hosted service. It also does not handle
 multi-hop delegation chains or key revocation yet.
