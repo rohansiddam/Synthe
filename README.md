@@ -4,6 +4,25 @@ Synthe checks every handoff between AI agents before the receiving agent acts on
 
 Most agent-to-agent handoffs today are blobs of text that the receiving agent takes on trust. That is how the same work gets done twice, stale artifacts get acted on, and actions nobody approved slip through. Synthe puts a gate in the middle: every handoff arrives as a typed packet, gets validated against a registry and the actual artifacts it points to, and gets an ACCEPT or a REJECT with a reason. Every accepted handoff is recorded, so the same one cannot be claimed twice.
 
+## v0.5
+
+Additive on top of v0.3 (same wire format, `schema_version: "0.1"`):
+
+- **Approvals that pin the effect's target** (v0.4). A planned action may carry `params` (for
+  example a branch or a recipient). An approval can sign them too, so a sender cannot retarget an
+  approved action: `approval_params_mismatch`. Approvals without `params` work exactly as in v0.3.
+- **Detached and deferred approvals.** An approval can arrive after the packet, signed the same
+  way and checked the same way (`synthe_sign.py approve --detached`), so work can start before a
+  human answers and still never commit without one.
+- **Wait-for dependencies** (`depends_on`): a handoff's effects wait until its upstream handoffs
+  are `COMPLETED`; wait-for cycles are refused at claim time.
+- **Exclusive paths:** a receiver can refuse two live claims whose `owned_paths` overlap
+  (`claim_conflict`).
+- **Exactly-once per effect:** `fenced_effect()` fences each named effect of a multi-effect
+  handoff, and receipts for effects have their own signature domain.
+
+Details and every new reason code: [`SPEC.md`](SPEC.md); threats: [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
 ## v0.3
 
 Receiver policy (authority can only narrow), Ed25519-signed packets and
@@ -27,14 +46,14 @@ done
 
 ## Layout
 
-- `SPEC.md`: the contract (v0.3)
+- `SPEC.md`: the contract (v0.5)
 - `THREAT_MODEL.md`: what the gate stops and what it doesn't
 - `schema/handoff.schema.json`: JSON Schema for the packet
 - `src/handoff_check.py`: the checker (stdlib only; CLI + `check()` used by every entry point)
 - `src/synthe_crypto.py`, `src/synthe_sign.py`: Ed25519 signing and the keygen/approve/sign/verify CLI
 - `examples/`: v0.1 packets; `examples/v03/`: signed packet + 8 attack packets (test-only keys)
 - `github-action/`: the gate as a GitHub Action
-- `tests/`: 45 tests
+- `tests/`: 57 tests
 
 ## Quickstart
 

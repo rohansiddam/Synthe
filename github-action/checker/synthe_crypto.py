@@ -29,6 +29,7 @@ import os
 ALG = "Ed25519"
 PACKET_SIG_DOMAIN = "synthe/handoff-signature/v1"
 APPROVAL_SIG_DOMAIN = "synthe/approval-signature/v1"
+RECEIPT_SIG_DOMAIN = "synthe/effect-receipt/v1"
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +242,19 @@ def approval_signing_input(approval: dict, handoff: dict) -> bytes:
         "from": handoff.get("from"),
         "to": handoff.get("to"),
     }
+    # v0.4: an approval may pin the exact effect parameters (branch, remote,
+    # recipients...). Only included when present, so v0.3 approvals verify
+    # unchanged.
+    if approval.get("params") is not None:
+        payload["params"] = approval.get("params")
     return APPROVAL_SIG_DOMAIN.encode() + b"\n" + canonical_json(payload)
+
+
+def receipt_signing_input(receipt: dict) -> bytes:
+    """Bytes an effect executor signs for one effect receipt (everything but
+    the signature itself). Domain-separated from packets and approvals."""
+    body = {k: v for k, v in receipt.items() if k != "sig"}
+    return RECEIPT_SIG_DOMAIN.encode() + b"\n" + canonical_json(body)
 
 
 def find_key(registry: dict | None, agent_id: str, kid: str | None):
