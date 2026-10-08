@@ -12,7 +12,7 @@ licensing fields before converting it to a live listing.
 | Slug | `synthe-commit-barrier` |
 | Publisher | Synthe |
 | Category | Developer tools |
-| Package | `@synthe/openclaw-synthe-barrier` |
+| Package | `@synthelive/openclaw-synthe-barrier` |
 | Listing version | `0.1.0` |
 | OpenClaw compatibility | OpenClaw and plugin API `2026.9.8` or newer |
 | Components | `synthe-barrier` plugin + `synthe` skill |

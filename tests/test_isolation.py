@@ -573,8 +573,8 @@ def test_daemon_demo_runs_end_to_end(tmp_path):
     assert out.returncode == 0, out.stderr
     decisions = [line.split()[1] for line in out.stdout.splitlines() if line.strip().startswith("-> ")
                  and line.split()[1] in ("EXECUTED", "DENIED")]
-    assert decisions == ["EXECUTED", "DENIED", "DENIED", "DENIED", "DENIED", "DENIED", "EXECUTED"], out.stdout
-    assert "chain VERIFIED: 7 signed receipts" in out.stdout
+    assert decisions == ["EXECUTED", "EXECUTED", "DENIED", "DENIED", "DENIED", "DENIED", "EXECUTED"], out.stdout
+    assert "chain VERIFIED: 6 signed receipts" in out.stdout
 
 
 def test_selftest_world_builds_a_handoff_the_broker_accepts(tmp_path):

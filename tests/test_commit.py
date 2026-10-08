@@ -102,9 +102,11 @@ def test_replay_of_executed_effect(w):
     p = w.packet()
     token = w.claim(p)
     c = w.commit({"src/app.py": "x\n"})
-    assert w.propose(p, token, c)["decision"] == "executed"
+    first = w.propose(p, token, c)
+    assert first["decision"] == "executed"
     r = w.propose(p, token, c)
-    assert r["decision"] == "denied" and "duplicate_idempotency_key" in codes(r)
+    assert r == first
+    assert w.chain()["count"] == 1
     assert w.chain()["ok"]
 
 

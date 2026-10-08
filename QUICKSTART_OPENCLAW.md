@@ -7,8 +7,9 @@ GitHub token. Synthe pushes only after your signed approval.
 
 You can hand steps 1 and 2 to your coding agent (Claude Code, Codex, OpenClaw): point it at
 `skills/synthe-setup/SKILL.md`. Step 3 is yours, because it's where the secrets are typed. The steps
-were verified on 2026-10-07 (`docs/OPENCLAW_RESULTS.md`), but they haven't been timed with a new user
-yet.
+were verified on 2026-10-07 (`docs/OPENCLAW_RESULTS.md`), but they haven't been timed with a new user yet.
+
+Using Claude Code, Cursor, Cline, or no AI at all? See [ANY_AGENT.md](docs/ANY_AGENT.md).
 
 ## What you need
 
@@ -18,7 +19,21 @@ yet.
 - A fine-grained GitHub token for that one repo, with **Contents: Read and write**. You paste it
   once, hidden, in step 3.
 
-## 1. Install
+## Fast Track: 1-Line Setup
+
+Run this one command from your terminal:
+
+```bash
+curl -sSL https://synthe.live/install | bash
+```
+
+It checks Homebrew, installs Python and Node, sets up the virtual environment, prepares your repository, and launches setup.
+
+---
+
+## Or Manual Step-by-Step Install
+
+### 1. Install
 
 Run this from this Synthe folder. It builds Synthe its own environment, outside Documents and Desktop
 (iCloud hides dot-folders there, and Python 3.14 then skips an editable install's path file), with a
@@ -31,7 +46,7 @@ brew install python node git && PY=$(bash deploy/macos/find-python.sh) && "$PY" 
 If it says no working Python was found, do what it prints (usually `brew install python@3.13`), then
 run the same line again.
 
-## 2. Prepare
+### 2. Prepare
 
 Run this from this Synthe folder, with your repo URL and the paths the agent may change. It checks
 the Mac, needs no secrets, and writes the one command for step 3.
@@ -40,7 +55,7 @@ the Mac, needs no secrets, and writes the one command for step 3.
 ~/synthe-venv/bin/synthe-init prepare --repo-url https://github.com/YOU/REPO.git --allowed-paths 'src/**'
 ```
 
-## 3. Finish (you, about 2 minutes)
+### 3. Finish (you, about 2 minutes)
 
 ```bash
 bash ~/.synthe/finish-setup.sh
@@ -71,34 +86,24 @@ The existing passphrase-protected approval key stays registered as the fallback.
 [`docs/TOUCHID.md`](docs/TOUCHID.md) before enrolling: Touch ID protects the approval key, but it does
 not decide whether a diff is safe.
 
-## 4. Give OpenClaw its model
+## 4. Give OpenClaw its model & start chatting
 
-Setup already runs OpenClaw's gateway as a service in the agent's account. The Synthe plugin acts
-only through the gateway: `openclaw tui --local` and `openclaw chat` skip it, which leaves only the
-wall.
+Setup already runs OpenClaw's gateway as a service in the agent's account. Connect to the agent account and configure your model without the onboarding wizard traps:
 
 ```bash
 sudo -iu openclaw
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+openclaw models auth add
 ```
-```bash
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && openclaw onboard
-```
+*(Select your provider and paste your key)*
 
-During onboarding, give it your model and API key, and say no to the rest:
-- **Plugins:** it scans the Mac's apps and may pre-tick some to install. Choose "Skip for now".
-- **Gateway service:** skip installing it. Setup already runs the gateway for this account, and it
-  picks up your model without a restart.
-- **At the end it opens a chat for you.** That chat is embedded (`local embedded` in its title bar),
-  so the Synthe plugin doesn't run in it. Quit it (Ctrl+C) and continue below.
-
-Then chat with OpenClaw through the gateway:
+Then start chatting through the gateway:
 
 ```bash
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && cd ~/repo && openclaw tui
+cd ~/repo && openclaw tui
 ```
 
-Check the title bar: it should say `ws://127.0.0.1:...` (the gateway), not `local embedded`.
-If you set up a team of agents during onboarding, add `--session agent:<name>:main`.
+Check the title bar: it will say `ws://127.0.0.1:...` (the gateway). You are fully protected by Synthe.
 
 ## 5. Give OpenClaw a task (your account)
 

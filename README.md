@@ -34,6 +34,9 @@ Verified on 2026-10-07 on macOS, against real GitHub. The evidence is in
 (`skills/synthe-setup/SKILL.md`). You run one command, which asks for a passphrase, your GitHub token
 (hidden) and your Mac password.
 
+Using Claude Code, Cursor, Cline, or no AI at all? See [`docs/ANY_AGENT.md`](docs/ANY_AGENT.md).
+
+
 ## What's here
 
 | Part | Where | License |

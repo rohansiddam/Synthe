@@ -47,7 +47,9 @@ INSTRUCTIONS = (
     "to make it pass and never invent missing facts (approvals, hashes, evidence). An ACCEPT "
     "and every receipt carry `plan` (purpose, planned actions with their status, what remains, "
     "the constraints): re-read `plan` before every step. After the work's effect is real, call "
-    "synthe_complete_handoff with the same packet and the claim token from the ACCEPT."
+    "synthe_complete_handoff with the same packet and the claim token from the ACCEPT. For a "
+    "broker-mediated effect, retry the identical synthe_propose_effect call after a lost response: "
+    "a completed exact effect replays its stored signed result and a changed effect conflicts."
 )
 
 PACKET_SCHEMA = {"type": "object", "description": "A Synthe handoff packet: {\"handoff\": {...}, "
@@ -79,7 +81,7 @@ TOOLS = [
         "name": "synthe_complete_handoff",
         "title": "Mark a claimed handoff completed",
         "description": "After the handed-off work's effect has actually happened, flip the packet's "
-                       "idempotency key from RESERVED to COMPLETED so it can never be replayed. Pass "
+                       "idempotency key from RESERVED to COMPLETED so its effect can never execute again. Pass "
                        "the claim token that synthe_validate_handoff returned with ACCEPT. Only call "
                        "this for effects that really happened.",
         "inputSchema": {"type": "object", "properties": {
@@ -115,6 +117,9 @@ PROPOSE_TOOL = {
                    "expected_old = SHA or 'new', optional base = the remote BRANCH a new branch starts "
                    "from, default main, never a commit; leave it out unless the handoff names one) and "
                    "source = the path of your repo (its commits are sent to the broker as a git bundle). "
+                   "If this exact completed proposal is retried, the broker returns the original signed "
+                   "result without another effect or receipt; changed effect inputs under the same "
+                   "identity fail with effect_fingerprint_mismatch. "
                    "Without a repo, send the files instead: "
                    "params {remote, branch, files: {path: full text}, delete: [paths], base_blobs: {path: "
                    "blob id from synthe_read_file, or null for a new file}, message}; Synthe builds the "

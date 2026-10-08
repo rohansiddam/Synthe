@@ -37,8 +37,8 @@ MUTATIONS = {
     ),
     "same-size receipt rewrite trusted": (
         "src/synthe_commit.py",
-        "    if not valid:\n",
-        "    if False:\n",
+        "    if not valid:\n        # Same byte count but different content",
+        "    if False:\n        # Same byte count but different content",
     ),
 }
 

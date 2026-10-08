@@ -56,6 +56,13 @@ enforced, for those effects only (`docs/COMMIT.md`):
 | Remote changes between check and push | `--force-with-lease` compare-and-swap | `remote_moved_during_commit` |
 | History rewrite | fast-forward only | `non_fast_forward` |
 | Silent denials | every decision is a signed, hash-chained receipt | `receipts verify` |
+| Retry after a completed effect | exact packet + claim token + full prepared-effect fingerprint returns the original verified receipt; the adapter is not called | `effect_fingerprint_mismatch`, `replay_receipt_mismatch` |
+
+Stored-result replay authenticates and reuses what the broker already recorded. It does not prove
+that an external provider told the truth, repair an incomplete effect fingerprint, or make a stale
+or negative reconciliation observation authoritative. **No negative observation grants a dispatch
+right.** A missing, stale, mismatched or uncertain provider observation stays `unknown` and blocked.
+See [`docs/REPLAY.md`](docs/REPLAY.md).
 
 ## v0.5: ordering and concurrent changes
 
@@ -137,7 +144,7 @@ git sees them.
 | Oversized proposal (memory, disk) | caps on paths and bytes per proposal | `content_too_large` |
 | Clobbering someone else's change (lost update) | every edited, deleted or created path cites the blob it was based on (`null` = new); checked at build time and again inside the fence before the push; rebuilt on a moved tip only if every cited blob is unchanged | `content_base_missing`, `content_conflict` |
 | Forged authorship or trailer injection | author is fixed to `<agent> via Synthe` (agent id sanitized), committer is the broker; message is one line, control characters stripped, trailers added by the broker | — |
-| Replay of an executed content proposal | the duplicate check runs before the commit is rebuilt; the fence still decides | `duplicate_idempotency_key`, `effect_already_executed` |
+| Replay of an executed content proposal | the full normalized content proposal is fingerprinted; an exact completed duplicate returns the stored receipt before rebuilding a commit, while changed content conflicts | `effect_fingerprint_mismatch`, `replay_receipt_mismatch` |
 | Secrets in proposed file text leak into the evidence chain | receipts carry counts, paths and a SHA-256 digest, never the text | — |
 | Agents read files they shouldn't | reads are opt-in per remote (`"readable": true`) and per branch (`readable_refs`, else `branches`); regular text files up to 200 KB only; read-only, from the broker's mirror | `read_not_allowed`, `file_not_text`, `file_too_large` |
 
@@ -183,6 +190,33 @@ branch, commit and files with the system prompt. The prompt cannot display the w
 compromised OS/UI remains outside this boundary. The `synthe-approve --passphrase` path deliberately
 keeps the sealed Ed25519 key as a recovery fallback. Details: [`docs/TOUCHID.md`](docs/TOUCHID.md).
 
+## v0.6: lane grants and delegate approvers
+
+A human may sign a bounded grant (receiver, remote, branch pattern, paths, uses, expiry, policy
+lineage). With a `delegate`, each push under it also needs that delegate's own signed approval of the
+exact staged commit: a reviewing model approves in the human's place, inside limits the human signed.
+Without a delegate, the grant itself approves (an unattended lane). Details:
+[`docs/COMMIT.md`](docs/COMMIT.md) "Lane grants and delegate approvers".
+
+| Threat | Mechanism |
+|---|---|
+| An agent approves its own push through a delegate | the delegate is never the handoff's sender or receiver (`delegate_is_party`), and must be a registered `model_approver` named by the grant |
+| An agent mints a grant or a delegate approval | grants need a trusted human's signature; delegate approvals need the named delegate's key, over its own signing domain (never valid as a human approval, or as an escalation, or back) |
+| A delegate pre-approves a commit it never saw, or the agent swaps the commit after review | the approval pins the remote, branch and commit of the broker's staged record, and is matched again at commit time and at dispatch |
+| An agent re-pushes until the reviewer says yes | an escalation sticks to the proposal (key + action) for every later commit; only a human approves it |
+| Escalation or revocation races the push | the delegate approval and the grant are read again under the lane lock immediately before `git push`; a use is reserved only after that |
+| A long-lived delegate approval is replayed | at most 60 minutes, never past the grant; the grant's uses, expiry and lineage still apply |
+| Policy or approvers change after the grant was signed | the grant carries their digests: any change makes it `template_stale` |
+
+Limits (say these plainly): a delegate model can be fooled, for example by instructions planted in
+the diff or the task text; then it approves what the grant allows. The grant's branch, path, use and
+time limits bound that; they don't remove it. Receipts prove which **key** approved, not which model
+or prompt produced the decision. The delegate key must live in its own process and OS user (rule:
+isolation), never in an agent's; a delegate key an agent can read is an agent approving itself. A grant
+without a delegate has no per-push reviewer at all: it trades review for speed within its limits.
+Content proposals are not delegated yet (they wait for a human).
+
+>>>>>>> release/v0.7.1-clawhub
 ## Out of scope: what it does NOT stop (be honest about these)
 
 1. **A compromised or prompt-injected sender.** It produces a perfectly valid,
