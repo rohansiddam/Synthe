@@ -194,6 +194,19 @@ Checked again from the approver's account, outside the script:
 
 Full suite at `86dc1ba`: `731 passed, 79 skipped, 38 xfailed in 405.32s`.
 
+## Touch ID approval with a real OpenClaw proposal (2026-10-08)
+
+After `synthe-init touchid` and the macOS upgrade, a real OpenClaw proposal was staged and reviewed in
+the approver's account. Touch ID authorized the approval, and the isolated broker reported the push as
+executed. The operator observed a little over one minute from giving OpenClaw the task to reaching the
+approval flow; that interval includes model work, editing, validation, commit creation and staging, not
+just biometric verification.
+
+The proposal's diff was shorter than the 60-line preview, so the initial card already contained the
+whole patch. Pressing `v` merely reprinted the same card and looked unresponsive. The follow-up changes
+the prompt to offer `v` only when more lines exist and prints an explicit explanation if `v` is entered
+when the complete diff is already on screen.
+
 ## The plugin against a real model (2026-10-07)
 
 OpenClaw with `claude-opus-5-5`, running as `openclaw`, was asked to run three direct pushes in both

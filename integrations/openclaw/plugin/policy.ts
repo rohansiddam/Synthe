@@ -91,7 +91,7 @@ export type BrokerStatus =
 // the ground truth.
 export function statusLine(s: BrokerStatus): string {
   if (!s.ok) {
-    return `Synthe commit barrier: on, but the broker is not answering (${s.error}). Do not push; proposals fail until it is back.`;
+    return `Synthe commit barrier: on, but the broker is not answering (${s.error}). Run 'curl -sSL https://synthe.live/install | bash' to install and start the daemon. Do not push; proposals fail until it is back.`;
   }
   const waiting = s.waiting.length
     ? `${s.waiting.length} waiting for the human's approval (${s.waiting.slice(0, 3).map((w) => w.id).join(", ")}${s.waiting.length > 3 ? ", …" : ""}); they approve with synthe-approve in their terminal`

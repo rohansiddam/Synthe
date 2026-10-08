@@ -407,6 +407,67 @@ start before a human signs). The handoff shows **Approve** (`approve_at_commit`)
 *detached* approval to the broker, so the packet and any claim stay intact. The broker then commits
 whatever staged proposal it now covers, and the detail view lists the approvals and receipts.
 
+## Lane grants and delegate approvers (v0.6)
+
+By default a human approves every push. A human may instead sign a **lane grant**
+(`src/synthe_lane_templates.py`): for one receiver, `git_push` only, a remote and a branch pattern, the
+paths it may touch, a maximum number of uses, an expiry, and the digests of the receiver policy, the
+trusted approvers and the effects config it was signed against (any change makes it `template_stale`).
+Only a human in the receiver's `trusted_approvers` signs one (Ed25519 passphrase key or Touch ID key);
+any trusted human may revoke it. Uses are reserved under one lock immediately before `git push` and are
+never refunded.
+
+A grant **without** a delegate stands in for the per-push approval itself (an unattended lane). A grant
+**with** `"delegate": "<identity>"` hands the per-push review to that approver, typically a reviewing
+model:
+
+- The delegate is registered with `kind: "model_approver"` and its own key, is named by the grant, and
+  is never the sender or the receiver of the handoff it reviews (`delegate_is_party`).
+- It approves only a proposal the broker has **staged**, pinned to the staged remote, branch and commit,
+  for at most 60 minutes and never past the grant (`submit_delegate_approval`; signing domain
+  `synthe/delegate-approval/v1`). Anything else is receipted and refused.
+- It may **escalate** instead (`escalate`; domain `synthe/delegate-escalation/v1`; recommendation
+  `reject` or `unsure`). An escalation sticks to the proposal (idempotency key + action, whatever commit
+  is pushed next): no later delegate approval counts, only a human's.
+- At dispatch, under the lane lock, the delegate approval is read again (escalated, expired, or for
+  another commit: nothing is pushed and no use is spent), then a use is reserved.
+- A human's own approval always works as before and spends no grant use.
+- `delegate_grant` (read-only) tells an approver which grant covers a staged push, so it cites the right
+  one; staged proposals list `review` (waiting on the delegate) or `escalated` in `waiting_for`.
+
+Receipts: `kind: "delegate_approval"` (`delegate_approval_accepted` / `delegate_approval_rejected`) and
+`kind: "delegate_escalation"` (`escalated` / `escalation_rejected`); the push receipt names the delegate,
+`delegated_by` (the human who signed the grant) and the grant use. Receipts prove which **key** approved,
+not which model holds it.
+
+A grant may also carry a `brief` (up to 4000 characters): the human's own instructions to the reviewer
+("small src/ changes only, no new dependencies"). It is signed with the grant, so the reviewer can tell
+it apart from the task text and the diff, which agents wrote.
+
+**Running a reviewing model** (`src/synthe_approver.py`, its own OS user; the model never sees the key):
+
+```bash
+synthe-approver keygen --agent claude-reviewer --out ~/.synthe-approver/key.json
+```
+
+Add the printed entry (`kind: "model_approver"`) to the broker's registry, sign a grant naming it as
+`delegate` (Studio or the Lab: `/api/lane-template`; `synthe-approver grant` prints a body to sign),
+then give the reviewing model the MCP server:
+
+```bash
+synthe-approver mcp --broker unix:///var/run/synthe/broker.sock --key ~/.synthe-approver/key.json
+```
+
+Its tools are `synthe_review_queue`, `synthe_review_detail` (the broker's diff, the task, the brief,
+each labelled by who wrote it) and `synthe_review_decide` (approve the exact commit read, or escalate
+with `reject` / `unsure`). A commit restaged after the model looked is refused (`commit_changed`); the
+key file must be private to the approver's user (`approver_key_exposed`).
+
+What it does not do: content proposals (no commit until the broker builds one) are not covered by a
+delegate yet, so they wait for a human. A delegate that is fooled (prompt injection in the diff) can
+approve what the grant allows; the grant's branch, path, use and time limits bound that, they don't
+remove it.
+
 ## Reason codes (new in v0.4)
 
 | Code | State | Meaning |
@@ -445,6 +506,14 @@ whatever staged proposal it now covers, and the detail view lists the approvals 
 | `content_malformed` | invalid | v0.5: `files`/`delete`/`base_blobs` have the wrong shape, text isn't UTF-8 or holds a NUL, a path appears twice, a cited blob isn't 40-hex, or the target path isn't a regular file |
 | `content_too_large` | invalid | v0.5: more than `max_content_files` paths (100) or `max_content_mb` (2) of text |
 | `content_base_missing` | blocked | v0.5: a changed or deleted path isn't cited in `base_blobs` (cite `null` for a new file) |
+| `template_malformed`, `template_scope`, `template_unavailable` | invalid/blocked | v0.6: a lane grant has the wrong shape, doesn't cover this receiver/remote/branch/paths, or the named grant isn't usable |
+| `template_signature_invalid`, `template_expired`, `template_stale`, `template_revoked`, `template_exhausted` | blocked | v0.6: the grant's human signature fails, it expired, the policy/approvers/effects changed since it was signed, it was revoked, or its uses are spent |
+| `template_id_reused`, `template_revocation_invalid`, `template_store_corrupt`, `registry_unreadable` | invalid | v0.6: a grant id was reused, a revocation isn't signed by a trusted human, or broker state can't be read |
+| `delegate_invalid` | invalid | v0.6: a grant names a delegate that isn't a registered `model_approver`, or is the receiver |
+| `delegate_malformed`, `delegate_signature_invalid`, `delegate_not_named`, `delegate_is_party` | invalid/blocked | v0.6: a delegate approval/escalation has the wrong shape, its signature fails, its signer isn't the grant's delegate, or the signer is the handoff's sender or receiver |
+| `delegate_approval_missing`, `delegate_approval_stale`, `delegate_approval_expired`, `delegate_approval_too_long` | blocked | v0.6: no delegate approval yet; it is not for the staged commit/handoff; it expired; or it asks for more than 60 minutes (or outlives the grant). The proposal stays staged (`review`) |
+| `delegate_escalated` | blocked | v0.6: the delegate sent this proposal to a human; only a human approval commits it (`escalated`) |
+| `delegate_store_corrupt` | invalid | v0.6: the delegate decisions file can't be read |
 | `content_conflict` | stale | v0.5: a cited blob isn't what the branch holds now (someone changed the file, a "new" file exists, a deleted file is gone); nothing pushed, re-read and re-apply |
 
 **Reading the repo (v0.5).** `read_file` / `list_files` errors come back as daemon errors (no

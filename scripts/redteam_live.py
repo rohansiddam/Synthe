@@ -420,10 +420,14 @@ def cmd_attack(a, *, human=None) -> int:
         rep.add("control", "the approved in-scope change", "pushed, exactly the approved commit", executed,
                 f"GitHub {BRANCHES['main']}: {(tip or 'absent')[:12]}")
         if sid and executed:
+            before = ag.call("receipts", limit=1).get("count")
             r = ag.propose(packets["main"], token, BRANCHES["main"], tip)
+            after = ag.call("receipts", limit=1).get("count")
             rep.saw(r)
-            rep.add("replay", "push the same approved change again", "denied (already executed / no change)",
-                    r.get("decision") == "denied", f"{r.get('decision')} {_codes(r)}")
+            rep.add("replay", "push the same approved change again",
+                    "the stored executed receipt, with no second effect receipt",
+                    r.get("decision") == "executed" and isinstance(r.get("seq"), int) and before == after,
+                    f"{r.get('decision')} receipt #{r.get('seq')}; receipt count {before} -> {after}")
             r = ag.tool("synthe_complete_handoff", packet=packets["main"], claim_token=token)
             r2 = ag.tool("synthe_validate_handoff", packet=packets["main"], wait_for_approval=True)
             rep.add("replay", "reuse the finished task", "REJECT duplicate",

@@ -440,7 +440,9 @@ def test_the_admin_step_creates_the_agents_account_before_installing_and_drops_t
     assert text.index("sysadminctl -addUser") < text.index("install.sh\" --agent-user")   # the account first
     for step in ("add-agent-user.sh", "agent-setup --yes", f"openclaw@{si.OPENCLAW_VERSION}", "doctor --repo",
                  'chmod 700 "/Users/$APPROVER"', "cd /",
-                 'ln -sf "$APP/venv/bin/git-remote-synthe" "/Users/$AGENT_USER/.local/bin/git-remote-synthe"'):
+                 'ln -sf "$APP/venv/bin/git-remote-synthe" "/Users/$AGENT_USER/.local/bin/git-remote-synthe"',
+                 "com.synthe.openclaw-gateway", "<key>UserName</key><string>$AGENT_USER</string>",
+                 'launchctl bootstrap system "$GW_PLIST"'):
         assert step in text, step
 
 
@@ -465,3 +467,22 @@ def test_agent_setup_configures_a_local_token_gateway_and_keeps_an_existing_toke
     oc = _GatewayOC(token="already-set")
     si.configure_gateway(oc)
     assert not [c for c in oc.calls if c[:3] == ("config", "set", "gateway.auth.token")]
+
+
+def test_every_tool_setup_runs_or_links_from_the_system_install_has_a_launcher(tmp_path):
+    """A clean-Mac finding (2026-10-07): setup linked git-remote-synthe into the agent's PATH, but
+    add-agent-user.sh never wrote that launcher, so the link pointed at nothing and `git push` to a
+    synthe:: origin failed. Every $APP/venv/bin/<tool> the admin step uses must be written by it."""
+    import re
+    home = tmp_path / "home"
+    home.mkdir()
+    pub = si.approver_public_key(home, "rohan", passphrase=PASS)
+    text = si.stage_macos(home, repo_url=GH, branches=["agent/*"], allowed_paths=["src/**"], approver="rohan",
+                          approver_pub=pub, agent="openclaw", agent_user="openclaw", token_file=None,
+                          repo_root=ROOT, workspace=tmp_path / "ws").read_text()
+    used = set(re.findall(r'\$APP/venv/bin/([\w-]+)', text)) - {"python", "pip"}
+    adder = (ROOT / "deploy" / "macos" / "add-agent-user.sh").read_text()
+    loop = re.search(r"for name in ([\w ]+); do", adder).group(1).split()
+    written = {f"synthe-{n}" for n in loop} | set(re.findall(r'> "\$APP/venv/bin/([\w-]+)"', adder))
+    assert "git-remote-synthe" in used
+    assert used <= written, f"the admin step uses tools nobody installs: {sorted(used - written)}"

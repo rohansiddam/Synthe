@@ -48,6 +48,7 @@ import contextlib
 import copy
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -73,6 +74,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Plan params the sender must commit to for each effect type: the broker
 # never executes an effect whose target the sender did not sign.
 REQUIRED_PLAN_PARAMS = {"git_push": ("remote", "branch")}
+EFFECT_FINGERPRINT_DOMAIN = b"synthe/prepared-effect/v1\n"
 
 
 class Deny(Exception):
@@ -404,6 +406,101 @@ def verify_receipts(path: Path, registry: dict | None) -> dict:
     return {"ok": not errors, "count": len(receipts),
             "head": receipt_digest(receipts[-1]) if receipts and not receipts[-1].get("_unparseable") else None,
             "errors": errors, "receipts": report}
+
+
+def effect_fingerprint(action: str, effect_type: str, params: dict) -> str:
+    """Bind replay to the complete proposed effect, not just its operation id.
+
+    The transport (source path / bundle) is deliberately outside the binding:
+    for a git push the commit hash already binds the bytes and history. Defaults
+    that prepare() applies are made explicit so omission and an explicit default
+    describe the same effect. Unknown params remain in the digest and therefore
+    fail closed if their value changes or a later release gives them meaning.
+    """
+    if not isinstance(action, str) or not isinstance(effect_type, str) or not isinstance(params, dict):
+        raise Deny("invalid", "proposal_malformed", "the effect fingerprint needs action, type and params")
+    normalized = copy.deepcopy(params)
+    if effect_type == "git_push":
+        normalized.setdefault("base", "main")
+        normalized.setdefault("expected_old", None)
+        normalized.pop("fetch_from", None)  # proposal transport, not an external-effect input
+        if "files" in normalized or "delete" in normalized:
+            normalized.setdefault("files", {})
+            normalized["delete"] = sorted(normalized.get("delete") or [])
+            normalized.setdefault("base_blobs", {})
+            normalized.setdefault("message", "content proposal via Synthe")
+    body = {"action": action, "effect_type": effect_type, "params": normalized}
+    try:
+        encoded = sc.canonical_json(body)
+    except (TypeError, ValueError) as exc:
+        raise Deny("invalid", "proposal_malformed", f"effect params are not canonical JSON: {exc}") from None
+    return "sha256:" + hashlib.sha256(EFFECT_FINGERPRINT_DOMAIN + encoded).hexdigest()
+
+
+def _completed_replay(cfg: BrokerConfig, registry: dict, h: dict, token: str,
+                      action: str, fingerprint: str) -> tuple[dict | None, dict | None]:
+    """Return (original receipt, problem) for a completed proposal replay.
+
+    A ledger pointer is not enough. The append-only receipt stream must verify,
+    and the pointed receipt must bind the exact claim, epoch, action and complete
+    effect fingerprint. Any missing legacy field or mismatch blocks replay; it
+    never becomes permission to execute again.
+    """
+    entry = hc.load_ledger(cfg.ledger_path).get(h.get("idempotency_key"))
+    if not isinstance(entry, dict) or hc.entry_state(entry) != "COMPLETED":
+        return None, None
+    problem = hc._claim_problem(entry, h, token, require_token=True)
+    if problem:
+        return None, problem
+    prior = (entry.get("effects") or {}).get(action)
+    if not isinstance(prior, dict) or prior.get("state") != "EXECUTED":
+        return None, hc._reject(
+            "duplicate", "replay_result_unavailable",
+            f"idempotency_key '{h.get('idempotency_key')}' is completed but has no replayable result for '{action}'; "
+            "do not re-execute it")
+    prior_fp = prior.get("effect_fingerprint")
+    if not isinstance(prior_fp, str):
+        return None, hc._reject(
+            "duplicate", "replay_result_unavailable",
+            "the completed effect predates effect fingerprints; it cannot be proved equivalent and will not run again")
+    if not hmac.compare_digest(prior_fp, fingerprint):
+        return None, hc._reject(
+            "conflicting", "effect_fingerprint_mismatch",
+            "the idempotency key is completed, but the prepared effect differs from the recorded effect; "
+            "changed semantics never re-execute under the same identity")
+    seq = prior.get("receipt_seq")
+    chain = verify_receipts(cfg.receipts_path, registry)
+    if not chain["ok"]:
+        return None, hc._reject(
+            "unknown", "replay_receipt_unverified",
+            "the stored receipt chain does not verify; the result is not replayed and the effect remains blocked")
+    if not isinstance(seq, int) or seq < 1 or seq > len(chain["receipts"]):
+        return None, hc._reject(
+            "unknown", "replay_receipt_mismatch",
+            "the completed effect does not point to an exact stored receipt; the effect remains blocked")
+    receipt = chain["receipts"][seq - 1]
+    rh, reffect = receipt.get("handoff") or {}, receipt.get("effect") or {}
+    exact = (
+        receipt.get("verified") is True
+        and receipt.get("seq") == seq
+        and receipt.get("decision") == "executed"
+        and rh.get("idempotency_key") == h.get("idempotency_key")
+        and rh.get("id") == h.get("id")
+        and rh.get("packet_sha256") == entry.get("packet_sha256")
+        and (receipt.get("claim") or {}).get("epoch") == entry.get("epoch")
+        and reffect.get("action") == action
+        and reffect.get("fingerprint") == fingerprint
+        and isinstance(receipt.get("observed"), dict)
+    )
+    if not exact:
+        return None, hc._reject(
+            "unknown", "replay_receipt_mismatch",
+            "the stored receipt does not exactly match the completed claim and prepared effect; "
+            "the result is not replayed and the effect remains blocked")
+    # verify_receipts adds only a display flag. Remove it from the already
+    # verified object instead of re-reading the file after verification (which
+    # would create a time-of-check/time-of-use gap).
+    return {k: v for k, v in receipt.items() if k != "verified"}, None
 
 
 # --------------------------------------------------------------------------
@@ -1087,6 +1184,8 @@ class GitPush:
         self.laps.lap("inspect")
         if dry_run:
             return {"before": before, "observed": {"commits": len(commits), "paths": paths, "base": base_sha}}
+        if getattr(self, "authorize_dispatch", None):
+            self.authorize_dispatch(paths)
         lease = f"--force-with-lease=refs/heads/{branch}:{before or ''}"
         push = _git([*pre, "-C", str(self.mirror), "push", "--porcelain", "--no-verify", lease, url,
                      f"{commit}:refs/heads/{branch}"], env=env, check=False)
@@ -1216,6 +1315,9 @@ APPROVAL_CODES = {"approval_missing", "approval_expired", "approval_expires_inva
                   "approval_params_mismatch", "approver_not_trusted", "approval_unsigned",
                   "approval_signature_invalid", "approval_commit_missing"}
 DEPENDENCY_CODES = {"dependency_incomplete", "dependency_unknown"}
+# A push under a grant with a delegate waits for that delegate (or a human); escalated waits for a human.
+DELEGATE_WAIT_CODES = {"delegate_approval_missing", "delegate_approval_expired", "delegate_approval_stale",
+                       "delegate_escalated"}
 
 
 # --------------------------------------------------------------------------
@@ -1466,13 +1568,15 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
 
         # 2. authority at commit time: the whole handoff re-validated now. The
         #    other mediated effects' approvals are checked when they commit.
+        import synthe_lane_templates as lanes
+        lane = lanes.select(cfg, registry, h.get("to"), params) if etype == "git_push" else None
         at = hc.now_utc()
         info: dict = {}
         mediated = [a.get("name") for a in h.get("planned_actions") or []
                     if isinstance(a, dict) and a.get("tool") in cfg.effects]
         ok, reasons = hc.validate(packet, registry=registry, ledger={}, workspace=cfg.workspace,
                                   at=at, info=info, verify_evidence=cfg.verify_evidence,
-                                  extra_approvals=extra, defer_approvals={m for m in mediated if m != action},
+                                  extra_approvals=extra, defer_approvals={m for m in mediated if m != action or lane},
                                   as_receiver=cfg.receiver_id)
         pending: list = []  # what a staged proposal waits for
         if not ok:
@@ -1480,15 +1584,26 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
                 raise _DenyMany(reasons)
             pending = list(reasons)
 
-        # 3. a trusted human approved exactly this effect (in the packet, or detached)
-        if not pending:
+        # 3. a trusted human approved exactly this effect (in the packet, or detached); under a grant that
+        #    names a delegate, otherwise the delegate approved this exact commit. A grant without a delegate
+        #    stands in for the approval itself (checked again, and a use reserved, at dispatch).
+        if not pending and (not lane or lane.get("delegate")):
             try:
                 receipt["approvals"] = _approvals_for(h, registry, action, etype, params, at, extra,
                                                       require_commit_pin=_needs_commit_pin(cfg, etype))
+                lane = None  # a human's approval never spends a grant use
             except Deny as d:
                 if d.reason["code"] not in APPROVAL_CODES:
                     raise
-                pending = [d.reason]
+                if not lane:
+                    pending = [d.reason]
+                else:
+                    try:
+                        receipt["approvals"] = [lanes.delegate_approval(cfg, registry, h, action, params, lane)]
+                    except Deny as dd:
+                        if dd.reason["code"] not in DELEGATE_WAIT_CODES:
+                            raise
+                        pending = [d.reason, dd.reason]
         if wait:  # an unfinished upstream stages the proposal instead of failing in the fence
             ledger = hc.load_ledger(cfg.ledger_path)
             dep = hc._dependency_problem(ledger, h, ledger.get(h.get("idempotency_key")))
@@ -1497,9 +1612,27 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
         if pending and not wait:
             raise _DenyMany(pending)
 
-        # A replay is a duplicate, whatever else is wrong with it: say so before
-        # prepare (a content replay would otherwise trip on its own stale
-        # citations). The fence still decides, under the lock.
+        # A completed replay is decided from the complete proposed effect, not
+        # merely the idempotency key. Matching proposals return the original
+        # signed receipt byte-for-byte; changed semantics conflict and never
+        # reach prepare() or the external-effect adapter.
+        # A staged proposal may carry an internally-added expected_old pin on
+        # retry.  That pin protects the commit race but is not a caller change
+        # to the prepared effect.  Preserve the fingerprint computed from the
+        # original proposal; explicit caller-supplied expected_old values were
+        # already included in it.
+        fingerprint = ((_staged or {}).get("effect_fingerprint")
+                       if isinstance((_staged or {}).get("effect_fingerprint"), str)
+                       else effect_fingerprint(action, etype, params))
+        replayed, replay_problem = _completed_replay(
+            cfg, registry, h, token, action, fingerprint)
+        if replayed is not None:
+            return replayed
+        if replay_problem is not None:
+            raise _DenyMany(replay_problem["reasons"])
+
+        # A previously executed action on a still-RESERVED multi-effect claim
+        # is not a completed result replay. Keep the existing fail-closed path.
         replay = _replay_problem(cfg, h, token, action)
         if replay:
             raise _DenyMany(replay["reasons"])
@@ -1521,7 +1654,7 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
         scope = _scope(registry, h)
         if pending:
             return _stage(cfg, finish, packet, h, token, action, params, prep, eff, scope, pending, origin,
-                          receipt["commits_from"], _staged)
+                          receipt["commits_from"], fingerprint, _staged)
 
         # 5. inside the claim fence: live check, effect, observe, receipt
         try:
@@ -1529,13 +1662,36 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
             with hc.fenced_effect(packet, cfg.ledger_path, token, action, mediated) as record:
                 laps.lap("fence")  # the ledger lock, the claim and dependency checks
                 receipt["claim"] = {"epoch": record["epoch"]}
-                result = eff.commit(prep, scope)
-                record.update(state=result["state"], commit=prep["commit"], branch=prep["branch"])
+                # Revalidate and reserve under the shared lane lock at dispatch.
+                # Revocation cannot race a push after returning successfully.
+                if lane:
+                    def authorize(paths):
+                        current_registry, error = hc.load_registry(str(cfg.registry_path))
+                        if error:
+                            raise Deny("invalid", "registry_unreadable", "registry unavailable at dispatch")
+                        valid, why = hc.validate(packet, registry=current_registry, ledger={}, workspace=cfg.workspace,
+                                                  at=hc.now_utc(), extra_approvals=load_approvals(cfg, h),
+                                                  defer_approvals=set(mediated), verify_evidence=cfg.verify_evidence,
+                                                  as_receiver=cfg.receiver_id)
+                        if not valid:
+                            raise _DenyMany(why)
+                        if lane.get("delegate"):  # escalated or expired since: nothing is pushed, no use spent
+                            receipt["approvals"] = [lanes.delegate_approval(cfg, current_registry, h, action, params, lane)]
+                        receipt["lane_template"] = lanes.reserve(cfg, h.get("to"), params, paths, lane["template_id"])
+                    eff.authorize_dispatch = authorize
+                    with lanes.locked(cfg):
+                        result = eff.commit(prep, scope)
+                else:
+                    result = eff.commit(prep, scope)
+                record.update(state=result["state"], commit=prep["commit"], branch=prep["branch"],
+                              effect_fingerprint=fingerprint)
                 decision = "executed" if result["state"] == "EXECUTED" else "unconfirmed"
                 reasons = [] if decision == "executed" else [
                     {"state": "unknown", "code": "effect_unconfirmed", "message": result.get("note", "")}]
                 try:
-                    out = finish(decision, reasons, effect={"action": action, **result["effect"]},
+                    out = finish(decision, reasons,
+                                 effect={"action": action, **result["effect"],
+                                         "fingerprint": fingerprint},
                                  observed=result["observed"])
                     record["receipt_seq"] = out["seq"]
                 except Exception as exc:
@@ -1547,7 +1703,14 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
                 laps.lap("receipt")
             laps.lap("fence")  # recording the effect on the claim, under the lock
         except hc.FenceError as exc:
-            return finish("denied", exc.verdict["reasons"])
+            # A concurrent identical proposal may have completed while this
+            # one waited for the fence. Re-read the exact stored result before
+            # turning that race into a duplicate rejection.
+            replayed, replay_problem = _completed_replay(
+                cfg, registry, h, token, action, fingerprint)
+            if replayed is not None:
+                return replayed
+            return finish("denied", (replay_problem or exc.verdict)["reasons"])
         if _staged is None:  # proposed directly: a staged copy of this action is now moot
             _set_staged(cfg, h["idempotency_key"], action, only_from=("STAGED",), state="SUPERSEDED",
                         last_receipt_seq=out.get("seq"))
@@ -1579,7 +1742,7 @@ def _replay_problem(cfg, h, token, action) -> dict | None:
 
 
 def _stage(cfg, finish, packet, h, token, action, params, prep, eff, scope, pending, origin, commits_from,
-           staged) -> dict:
+           effect_fingerprint, staged) -> dict:
     """Hold a proposal that waits only for its approval or an upstream. It must
     be this claim's (token, RESERVED, effect not yet run) and pass every live
     check now; it is pinned to the remote state it saw, so any later move is
@@ -1603,7 +1766,8 @@ def _stage(cfg, finish, packet, h, token, action, params, prep, eff, scope, pend
     # Content proposals are re-checked by the blobs they cite (and rebased when
     # those are unchanged), so they aren't pinned to the tip seen now.
     pinned = prep["expected_old"] or ("cited-blobs" if prep.get("content") else preview["before"] or "new")
-    waiting = sorted({"approval" if r["code"] in APPROVAL_CODES else "dependency" for r in pending})
+    waiting = sorted({"approval" if r["code"] in APPROVAL_CODES else "escalated" if r["code"] == "delegate_escalated"
+                      else "review" if r["code"] in DELEGATE_WAIT_CODES else "dependency" for r in pending})
     sid = f"{key}/{action}"
     with _staged_store(cfg) as box:
         prev = (box["data"].get(key) or {}).get(action)
@@ -1623,6 +1787,7 @@ def _stage(cfg, finish, packet, h, token, action, params, prep, eff, scope, pend
             "id": sid, "state": "STAGED", "handoff_id": h.get("id"), "packet": packet, "claim_token": token,
             "action": action, "commits_from": commits_from,
             "params": params if prep.get("content") and not prep["expected_old"] else {**params, "expected_old": pinned},
+            "effect_fingerprint": effect_fingerprint,
             "origin": origin, "waiting_for": waiting, "receipt_seq": out.get("seq"),
             "staged_at": (staged or {}).get("staged_at") or now, "updated_at": now,
             "content_parent": (staged or {}).get("content_parent") or prep.get("parent"),
@@ -1645,18 +1810,28 @@ def _staged_ready(cfg: BrokerConfig, rec: dict) -> bool:
     extra = load_approvals(cfg, h)
     mediated = {a.get("name") for a in h.get("planned_actions") or []
                 if isinstance(a, dict) and a.get("tool") in cfg.effects}
+    import synthe_lane_templates as lanes
+    lane = lanes.select(cfg, registry, h.get("to"), rec["params"]) if etype == "git_push" else None
     info: dict = {}
     at = hc.now_utc()
     ok, reasons = hc.validate(packet, registry=registry, ledger={}, workspace=cfg.workspace, at=at, info=info,
                               verify_evidence=cfg.verify_evidence, extra_approvals=extra,
-                              defer_approvals=mediated - {action}, as_receiver=cfg.receiver_id)
+                              defer_approvals=mediated if lane else mediated - {action}, as_receiver=cfg.receiver_id)
     if not ok:
         return not _approval_only(reasons, info, action)
-    try:
-        _approvals_for(h, registry, action, etype, rec["params"], at, extra,
-                       require_commit_pin=_needs_commit_pin(cfg, etype))
-    except Deny as d:
-        return d.reason["code"] not in APPROVAL_CODES
+    if not lane or lane.get("delegate"):
+        try:
+            _approvals_for(h, registry, action, etype, rec["params"], at, extra,
+                           require_commit_pin=_needs_commit_pin(cfg, etype))
+        except Deny as d:
+            if d.reason["code"] not in APPROVAL_CODES:
+                return True
+            if not lane:
+                return False
+            try:
+                lanes.delegate_approval(cfg, registry, h, action, rec["params"], lane)
+            except Deny as dd:
+                return dd.reason["code"] not in DELEGATE_WAIT_CODES
     ledger = hc.load_ledger(cfg.ledger_path)
     dep = hc._dependency_problem(ledger, h, ledger.get(h.get("idempotency_key")))
     return not (dep and all(r["code"] in DEPENDENCY_CODES for r in dep["reasons"]))
@@ -1775,6 +1950,84 @@ def submit_approval(cfg: BrokerConfig, approval, origin: dict | None = None) -> 
     commits = retry_staged(cfg, idempotency_key=a["idempotency_key"],
                            trigger={"kind": "approval", "approver": a["approver"], "receipt_seq": out.get("seq")})
     return {"receipt": out, "commits": commits}
+
+
+def submit_delegate(cfg: BrokerConfig, doc, origin: dict | None = None, escalate: bool = False) -> dict:
+    """A grant delegate's signed approval of one staged push, or its escalation of that push to a human
+    (synthe_lane_templates). Receipted either way; an approval then retries the staged proposal, which re-runs
+    every check. Returns {"receipt", "commits": [receipts]}. A bad document never touches a staged proposal."""
+    import synthe_lane_templates as lanes
+    what = "synthe_commit.submit_delegate()"
+    if origin is None:
+        refusal = in_process_refusal(cfg, what)
+        if refusal:
+            raise NotIsolated(refusal)
+    key = ss.load_key(str(cfg.key_path))
+    origin = origin or IN_PROCESS
+    kind = "delegate_escalation" if escalate else "delegate_approval"
+    receipt: dict = {"v": 1, "kind": kind, "time": hc.now_utc().isoformat(), "decision": None, "reasons": [],
+                     "delegate": None, "handoff": None, "via": origin.get("via"), "isolation": origin.get("isolation")}
+
+    def finish(decision, reasons):
+        receipt.update(decision=decision, reasons=[{**r, "message": str(r.get("message", ""))} for r in reasons])
+        receipt.update(scrub_obj(receipt, cfg))
+        return append_receipt(cfg, key, receipt)
+
+    x = doc if isinstance(doc, dict) else {}
+    receipt["delegate"] = {k: x.get(k) for k in ("template_id", "approver", "kid", "action", "params", "expires_at",
+                                                 "recommendation", "note") if x.get(k) is not None}
+    if isinstance(receipt["delegate"].get("note"), str):
+        receipt["delegate"]["note"] = receipt["delegate"]["note"][:500]
+    receipt["handoff"] = {k: x.get(k) for k in ("idempotency_key", "from", "to") if isinstance(x.get(k), str)}
+    rejected = "escalation_rejected" if escalate else "delegate_approval_rejected"
+    registry, err = hc.load_registry(str(cfg.registry_path))
+    if err:
+        return {"receipt": finish(rejected, err["reasons"]), "commits": []}
+    staged = None
+    if not escalate and isinstance(x.get("idempotency_key"), str) and isinstance(x.get("action"), str):
+        with _staged_store(cfg) as box:  # a snapshot, released before the lane lock (no lock is ever nested)
+            staged = copy.deepcopy((box["data"].get(x["idempotency_key"]) or {}).get(x["action"]))
+    try:
+        with lanes.locked(cfg):
+            out = lanes.escalate(cfg, registry, x) if escalate else lanes.submit_delegate(cfg, registry, x, staged)
+    except Deny as d:
+        return {"receipt": finish(rejected, [d.reason]), "commits": []}
+    r = finish("escalated" if escalate else "delegate_approval_accepted", [])
+    if escalate:  # what the staged proposal waits for now: a human (shown to approvers and Studio)
+        with _staged_store(cfg) as box:
+            rec = (box["data"].get(x["idempotency_key"]) or {}).get(x["action"])
+            if rec and rec.get("state") == "STAGED":
+                rec["waiting_for"] = sorted((set(rec.get("waiting_for") or []) - {"review"}) | {"approval", "escalated"})
+                box["dirty"] = True
+        return {"receipt": r, "commits": [], **out}
+    commits = retry_staged(cfg, idempotency_key=x["idempotency_key"],
+                           trigger={"kind": "delegate_approval", "approver": x["approver"], "receipt_seq": r.get("seq")})
+    return {"receipt": r, "commits": commits, **out}
+
+
+def delegate_grant(cfg: BrokerConfig, staged_id) -> dict:
+    """Which grant (and delegate) covers a staged push right now, so an approver cites the right one."""
+    import synthe_lane_templates as lanes
+    if not isinstance(staged_id, str) or "/" not in staged_id:
+        raise Deny("invalid", "request_malformed", "id must be a staged proposal id (idempotency_key/action)")
+    key, _, action = staged_id.rpartition("/")
+    with _staged_store(cfg) as box:
+        rec = copy.deepcopy((box["data"].get(key) or {}).get(action))
+    if rec is None:
+        raise Deny("invalid", "staged_unknown", f"no staged proposal {staged_id!r}")
+    registry, err = hc.load_registry(str(cfg.registry_path))
+    if err:
+        raise Deny("invalid", err["reasons"][0]["code"], err["reasons"][0]["message"])
+    h = rec["packet"]["handoff"]
+    plan = [a for a in h.get("planned_actions") or [] if isinstance(a, dict) and a.get("name") == action]
+    t = lanes.select(cfg, registry, h.get("to"), rec.get("params") or {}) \
+        if plan and plan[0].get("tool") == "git_push" else None
+    t = t or {}
+    return {"id": staged_id, "state": rec.get("state"), "template_id": t.get("template_id"),
+            "delegate": t.get("delegate"), "granted_by": t.get("approver"),
+            # the human's own words to the reviewer, signed with the grant, and the limits it signed
+            "brief": t.get("brief"), "limits": {k: t.get(k) for k in ("params", "path_scope", "max_uses", "expires_at")}
+            if t else None, "decisions": lanes.delegate_view(cfg, staged_id)}
 
 
 class _DenyMany(Exception):

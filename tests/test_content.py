@@ -205,15 +205,17 @@ def test_forbidden_and_out_of_scope_paths_are_denied(w):
     assert w.remote_ref("feature/x") is None
 
 
-def test_replayed_content_is_a_duplicate(w):
+def test_replayed_content_returns_the_stored_result_and_changed_content_conflicts(w):
     p = w.packet()
     tok = w.claim(p)
-    assert propose(w, p, tok, files={"src/new.py": "x\n"})["decision"] == "executed"
-    for files in ({"src/new.py": "x\n"}, {"src/other.py": "y\n"}):  # same or different text: one key, one effect
-        r = propose(w, p, tok, files=files)
-        assert r["decision"] == "denied" and "duplicate_idempotency_key" in codes(r), r
+    first = propose(w, p, tok, files={"src/new.py": "x\n"})
+    assert first["decision"] == "executed"
+    assert propose(w, p, tok, files={"src/new.py": "x\n"}) == first
+    changed = propose(w, p, tok, files={"src/other.py": "y\n"})
+    assert changed["decision"] == "denied" and "effect_fingerprint_mismatch" in codes(changed), changed
     assert show(w, "feature/x", "src/new.py") == "x"
     assert "src/other.py" not in git(w.remote, "ls-tree", "-r", "--name-only", "feature/x").split()
+    assert w.chain()["count"] == 2  # one execution receipt and one conflicting retry receipt
     assert w.chain()["ok"]
 
 

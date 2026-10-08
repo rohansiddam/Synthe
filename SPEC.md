@@ -119,8 +119,13 @@ bytes never change.
 
 ## 5. Signatures
 
-- Algorithm: Ed25519 (RFC 8032). The checker uses `cryptography` when it is installed; otherwise it falls back to a
-  pure-Python implementation, which verifies fine, but its signing is not constant-time, so don't use it for production keys.
+- Packet signatures and receipts use Ed25519 (RFC 8032). The checker uses `cryptography` when it is
+  installed; otherwise it falls back to a pure-Python implementation, which verifies fine, but its
+  signing is not constant-time, so don't use it for production keys.
+- Approval signatures use the algorithm declared by the registered key: Ed25519, or ES256 (ECDSA
+  P-256 with SHA-256 and a 64-byte `r || s` signature). ES256 is approval-only; it cannot sign a
+  packet or receipt. The macOS Touch ID integration uses an ES256 key in the Secure Enclave. See
+  [`docs/TOUCHID.md`](docs/TOUCHID.md).
 - Canonical JSON: sorted keys, compact separators, UTF-8, whole-number floats
   written as ints.
 - **Packet signature** signs `"synthe/handoff-signature/v1\n" + canonical(handoff)`.
@@ -129,7 +134,8 @@ bytes never change.
   That binds an approval to exactly one handoff, so it can't be replayed onto another.
 - Order: approvers sign first, then the sender signs. The sender's signature
   covers the approvals list.
-- **`kid` (unreleased).** When the signer or approver has more than one key on record, the signature
+- **`kid` (unreleased).** When the signer or approver has more than one usable key for that signature
+  type on record, the signature
   must name its `kid`: `signature_kid_required` for a packet, `approval_kid_required` for an
   approval. Without it the first listed key was picked, so after a rotation that appended the new key
   without removing the old one, the old (possibly leaked) key still verified.
@@ -214,6 +220,13 @@ that exact claim is still `RESERVED`, and completes it atomically on success. Mo
 checking showed that without fencing, release-and-redispatch lets a slow receiver
 perform the effect twice (`formal/README.md`).
 
+**Reconciliation rule.** **No negative observation grants a dispatch right.** Reconciliation may
+move an ambiguous operation forward only from a fresh, authoritative observation that exactly
+matches the original logical identity and complete effect. `ABSENT`, stale, mismatched or uncertain
+observations leave it `unknown` and blocked. A local receipt can preserve what Synthe observed; it
+does not turn an unsigned provider response into provider-signed truth. Release remains an explicit
+operator action after the TTL, with the fencing rules above unchanged.
+
 **Wait-for dependencies (v0.5).** `depends_on` lists the idempotency keys of upstream
 handoffs. It is a sender fact inside the signed handoff, and the claim is bound to the
 packet digest, so neither a relay nor the claimant can drop it. At commit time
@@ -286,7 +299,14 @@ overlapping.
 `content_malformed`, `content_too_large` (invalid), `content_base_missing` (blocked),
 `content_conflict` (stale). **Reading the repo (v0.5; returned as an error, never receipted):**
 `read_not_allowed` (blocked), `file_not_found`, `file_not_text`, `file_too_large` (invalid), and
-`path_invalid` for a bad path or prefix. The other commit-broker codes are listed in
+`path_invalid` for a bad path or prefix. **Lane grants and delegate approvers (v0.6):**
+`template_malformed`, `template_scope`, `template_unavailable`, `template_id_reused`,
+`template_revocation_invalid`, `template_store_corrupt`, `registry_unreadable`, `delegate_invalid`,
+`delegate_malformed`, `delegate_store_corrupt` (invalid); `template_signature_invalid`,
+`template_expired`, `template_stale`, `template_revoked`, `template_exhausted`,
+`delegate_signature_invalid`, `delegate_not_named`, `delegate_is_party`,
+`delegate_approval_missing`, `delegate_approval_stale`, `delegate_approval_expired`,
+`delegate_approval_too_long`, `delegate_escalated` (blocked). The other commit-broker codes are listed in
 [`docs/COMMIT.md`](docs/COMMIT.md).
 
 **duplicate / conflicting / unknown:** `idempotency_key_reserved`,
@@ -338,6 +358,16 @@ Full detail: [`docs/COMMIT.md`](docs/COMMIT.md).
   the result. Only a confirmed effect is recorded `EXECUTED` under
   `ledger[key].effects[action]`. The claim becomes `COMPLETED` once every mediated planned
   action has executed. A denial never consumes the claim.
+- **Stored-result replay.** Every mediated proposal has a domain-separated SHA-256 fingerprint over
+  the action, effect type and complete effect params (with broker defaults normalized; bundle/source
+  transport excluded because the commit hash binds the proposed history). An `EXECUTED` ledger record
+  stores that fingerprint and the exact signed receipt sequence. Retrying a `COMPLETED` claim with the
+  same packet, claim token, action and fingerprint returns the original receipt unchanged: the effect
+  adapter is not called and no second receipt is appended. A different fingerprint under the same
+  identity is `conflicting` / `effect_fingerprint_mismatch`; it never executes. Replay also fails
+  closed if the receipt chain does not verify or the receipt does not exactly bind the claim, epoch,
+  action and fingerprint. Legacy completed entries without these fields remain duplicate and blocked;
+  they are never guessed equivalent. Details and limits: [`docs/REPLAY.md`](docs/REPLAY.md).
 - **Path policy.** Each path touched by any pushed commit must match the packet's
   `scope.owned_paths` (receiver defaults applied) and every policy layer's
   `allowed_paths`, and must not match `forbidden_paths` (unioned across layers).

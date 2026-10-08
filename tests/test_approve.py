@@ -224,6 +224,15 @@ def test_render_neutralizes_control_codes_in_everything_the_agent_wrote(w):
     assert out.index("Ignore previous instructions") > said  # the agent's words only after the label
 
 
+def test_view_is_offered_only_when_the_card_hides_diff_lines():
+    detail = {"changes": {"available": True, "patch": "\n".join(["+short"] * sa.PREVIEW_LINES)}}
+    assert not sa.diff_has_more(detail)
+    detail["changes"]["patch"] += "\n+one more"
+    assert sa.diff_has_more(detail)
+    assert "press v for all" in sa.render(detail)
+    assert "press v for all" not in sa.render(detail, full=True)
+
+
 def test_list_mode_works_without_a_terminal_but_approving_does_not(w, capsys, monkeypatch):
     stage(w)
     with daemon(w.cfg) as url:

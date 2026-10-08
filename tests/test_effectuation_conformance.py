@@ -30,7 +30,7 @@ EF = {
         "tests/test_invalidation.py::test_remote_moved_during_commit_caught_by_cas",
     ]),
     "EF-3": ("Anti-Replay", "covered", None, [
-        "tests/test_speculative.py::test_replaying_the_proposal_after_commit_is_a_duplicate",
+        "tests/test_speculative.py::test_replaying_the_proposal_after_commit_returns_the_stored_result",
         "tests/test_speculative.py::test_same_approval_twice_is_a_duplicate",
         "tests/test_invalidation.py::test_stale_holder_cannot_commit_twice",
         "tests/ledger/test_concurrency.py::test_50_parallel_claims_one_winner",

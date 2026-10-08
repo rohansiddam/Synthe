@@ -150,6 +150,8 @@ def isolation_problems(cfg: cm.BrokerConfig) -> list:
     guarded(cfg.receipts_path, "receipts")
     guarded(cfg.state_dir, "state dir")
     guarded(cfg.approvals_path, "detached approvals")
+    guarded(cfg.state_dir / "lane-templates.json", "lane templates")
+    guarded(cfg.state_dir / "delegate-approvals.json", "delegate approvals")
     if cfg.staged_path.exists():  # holds the claim tokens of staged proposals
         secret(cfg.staged_path, "staged proposals", "broker_credentials_exposed")
     return out
@@ -300,6 +302,73 @@ class Broker:
                              allow_path_source=self.cfg.allow_path_sources, timings=timings)
         return Reply(receipt, timings=timings) if timings is not None else receipt
 
+    def op_readiness(self, args, isolation):
+        """Non-claiming authority check for the scheduler. Never defers missing approval."""
+        import synthe_lane_templates as lanes
+        packet = args.get("packet")
+        h = packet.get("handoff") if isinstance(packet, dict) else None
+        if not isinstance(h, dict):
+            raise Refused("packet_required", "readiness needs a handoff")
+        registry = self._registry()
+        extra = cm.load_approvals(self.cfg, h)
+        at = hc.now_utc()
+        expires = [hc.parse_ts((h.get("acceptance") or {}).get("expires_at"))]
+        deferred, covered = set(), []
+        codes = []
+        for a in h.get("planned_actions") or []:
+            if a.get("tool") != "git_push":
+                continue
+            grant = lanes.select(self.cfg, registry, h.get("to"), a.get("params") or {})
+            if grant:
+                deferred.add(a["name"])
+                expires.append(hc.parse_ts(grant["expires_at"]))
+                covered.append(grant["template_id"])
+            else:
+                try:
+                    cm._approvals_for(h, registry, a["name"], a["tool"], a.get("params") or {}, at, extra)
+                    matching = [x for x in list((h.get("authority") or {}).get("approvals") or []) + extra
+                                if x.get("action") in (a["name"], a["tool"])
+                                and not hc._approval_ok(a["name"], [x], h, registry,
+                                                       hc.receiver_policy(registry, h.get("to")), at)]
+                    exp = [hc.parse_ts(x.get("expires_at")) for x in matching]
+                    if exp and all(exp):
+                        expires.append(max(exp))
+                except cm.Deny as e:
+                    codes.append(e.reason["code"])
+        ok, reasons = hc.validate(packet, registry=registry, ledger={}, workspace=self.cfg.workspace,
+                                  extra_approvals=extra, defer_approvals=deferred, at=at,
+                                  verify_evidence=self.cfg.verify_evidence, as_receiver=self.cfg.receiver_id)
+        codes.extend(x["code"] for x in reasons)
+        ledger = hc.load_ledger(self.cfg.ledger_path)
+        dep = hc._dependency_problem(ledger, h, ledger.get(h.get("idempotency_key")))
+        if dep:
+            codes.extend(x["code"] for x in dep["reasons"])
+        valid = [e for e in expires if e is not None]
+        return {"ok": not codes, "codes": sorted(set(codes)), "lane_templates": covered,
+                "valid_until": min(valid).isoformat() if valid else None}
+
+    def op_lane_templates(self, args, isolation):
+        import synthe_lane_templates as lanes
+        return lanes.view(self.cfg)
+
+    def op_lane_template_draft(self, args, isolation):
+        import synthe_lane_templates as lanes
+        registry, err = hc.load_registry(str(self.cfg.registry_path))
+        receiver = args.get("receiver")
+        if err or not lanes.enabled(self.cfg, receiver):
+            raise Refused("template_scope", "lane templates are not enabled for this receiver")
+        return {"lineage": lanes.lineage(self.cfg, registry, receiver)}
+
+    def op_submit_lane_template(self, args, isolation):
+        import synthe_lane_templates as lanes
+        out = lanes.submit(self.cfg, args.get("template"))
+        cm.retry_staged(self.cfg, sweep=True)
+        return out
+
+    def op_revoke_lane_template(self, args, isolation):
+        import synthe_lane_templates as lanes
+        return lanes.revoke(self.cfg, args.get("revocation") or {})
+
     def op_submit_approval(self, args, isolation):
         """A human's detached approval (synthe_sign.py approve --detached). It is
         verified like an embedded one, receipted either way, and commits every
@@ -307,6 +376,20 @@ class Broker:
         approver's signature makes it count."""
         return cm.submit_approval(self.cfg, args.get("approval"), origin={"isolation": isolation,
                                                                          "via": self.transport})
+
+    def op_submit_delegate_approval(self, args, isolation):
+        """A grant delegate's signed approval of one staged push (synthe_approver.py). Receipted either way;
+        only the delegate's signature, a live grant naming it and the broker's own staged record make it count."""
+        return cm.submit_delegate(self.cfg, args.get("approval"), origin={"isolation": isolation, "via": self.transport})
+
+    def op_escalate(self, args, isolation):
+        """A grant delegate sends a staged push to a human: from then on only a human approval commits it."""
+        return cm.submit_delegate(self.cfg, args.get("escalation"), origin={"isolation": isolation, "via": self.transport},
+                                  escalate=True)
+
+    def op_delegate_grant(self, args, isolation):
+        """Read-only: the grant and delegate covering a staged push, and what delegates decided on it."""
+        return cm.delegate_grant(self.cfg, args.get("id"))
 
     def op_submit_task(self, args, isolation):
         with self.task_lock:

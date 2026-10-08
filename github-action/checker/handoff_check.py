@@ -725,11 +725,12 @@ def _approval_ok(name: str, candidates: list, h: dict, registry, policy, at) -> 
             ambiguous = False
             try:
                 import synthe_crypto as sc
+                # Ed25519 (passphrase key) or ES256 (Touch ID key): the registered key decides which.
                 ambiguous = (appr.get("kid") is None
-                             and len(sc.usable_keys(registry, appr.get("approver"))) > 1)
-                key = None if ambiguous else sc.find_key(registry, appr.get("approver"), appr.get("kid"))
-                good = key is not None and sc.verify_bytes(
-                    key, sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
+                             and len(sc.usable_approval_keys(registry, appr.get("approver"))) > 1)
+                good = not ambiguous and sc.verify_approval(
+                    registry, appr.get("approver"), appr.get("kid"),
+                    sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
             except Exception:
                 good = False
             if ambiguous:

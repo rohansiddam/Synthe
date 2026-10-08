@@ -46,17 +46,24 @@ def _copy_repo(dst: Path) -> None:
         shutil.copy2(ROOT / "tests" / name, dst / "tests" / name)
 
 
-def _run(dst: Path) -> subprocess.CompletedProcess:
+def _run(dst: Path, timeout: int = 600) -> subprocess.CompletedProcess | None:
+    """The approval tests on a copy; None if they hang past `timeout` (a mutant that hangs did not pass:
+    without the key-derivation bound, an altered key file makes scrypt run for hours)."""
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    return subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider",
-                           str(dst / "tests" / "test_approve.py")],
-                          cwd=dst, env=env, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    try:
+        return subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider",
+                               str(dst / "tests" / "test_approve.py")],
+                              cwd=dst, env=env, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 @pytest.mark.skipif(os.environ.get("SYNTHE_SKIP_MUTATIONS") == "1", reason="SYNTHE_SKIP_MUTATIONS=1")
 def test_unmutated_copy_passes(tmp_path):
     _copy_repo(tmp_path)
     run = _run(tmp_path)
+    assert run is not None, "the unmutated approval tests hung"
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
 
 
@@ -69,5 +76,5 @@ def test_mutation_is_caught(name, tmp_path):
     text = target.read_text()
     assert text.count(original) == 1, f"mutation anchor for {name!r} not found exactly once in {rel}"
     target.write_text(text.replace(original, mutated))
-    run = _run(tmp_path)
-    assert run.returncode != 0, f"mutation {name!r} survived: the approval tests did not notice"
+    run = _run(tmp_path, timeout=120)
+    assert run is None or run.returncode != 0, f"mutation {name!r} survived: the approval tests did not notice"

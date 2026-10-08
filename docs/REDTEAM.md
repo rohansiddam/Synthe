@@ -22,7 +22,7 @@ a dev broker and a local remote.
 | approval | terminal control codes in the commit message the human reads | shown as harmless text |
 | approval | swap the commit after the human read the diff | the swapped commit never reaches GitHub |
 | control | the in-scope change, approved by the human | pushed, exactly that commit |
-| replay | push it again; reuse the finished task | denied / REJECT duplicate |
+| replay | push it again; reuse the finished task | stored signed result with no new receipt / REJECT duplicate |
 | receipts | one receipt per refusal; verify the chain with the broker's public key; edit a copy | matches; verifies; the edit is caught |
 
 The rehearsal also checks the battery itself. With the path-scope check or the history-rewrite check

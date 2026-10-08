@@ -24,6 +24,7 @@ synthe-client = "synthe_client:main"
 synthe-mcp = "synthe_mcp:main"
 synthe-a2a = "synthe_a2a:main"
 synthe-approve = "synthe_approve:main"
+synthe-approver = "synthe_approver:main"
 synthe-init = "synthe_init:main"
 synthe-task = "synthe_task:main"
 git-remote-synthe = "synthe_git_remote:main"
@@ -33,7 +34,8 @@ package-dir = { "" = "src" }
 py-modules = [
   "handoff_check", "synthe_crypto", "synthe_sign", "synthe_plan", "synthe_commit",
   "synthe_broker", "synthe_client", "synthe_mcp", "synthe_a2a", "synthe_approve",
-  "synthe_init", "synthe_task", "synthe_ui", "synthe_git_remote",
+  "synthe_init", "synthe_task", "synthe_ui", "synthe_git_remote", "synthe_touchid",
+  "synthe_lane_templates", "synthe_approver",
 ]
 
 [tool.setuptools.data-files]

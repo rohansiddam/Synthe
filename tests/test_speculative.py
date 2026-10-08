@@ -270,12 +270,11 @@ def test_concurrent_identical_approvals_store_one(w):
     assert w.chain()["ok"]
 
 
-def test_replaying_the_proposal_after_commit_is_a_duplicate(w):
+def test_replaying_the_proposal_after_commit_returns_the_stored_result(w):
     p, tok, sha, r = stage(w)
-    cm.submit_approval(w.cfg, detached(w, p))
+    [executed] = cm.submit_approval(w.cfg, detached(w, p))["commits"]
     again = w.propose(p, tok, sha, wait_for_approval=True)
-    assert again["decision"] == "denied"
-    assert codes(again) & {"duplicate_idempotency_key", "effect_already_executed"}
+    assert again == executed
 
 
 def test_restaging_supersedes_the_older_stage(w):
