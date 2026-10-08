@@ -28,7 +28,8 @@ def test_console_script_resolves(name, target):
 def test_data_files_exist():
     for files in PROJECT["tool"]["setuptools"]["data-files"].values():
         for f in files:
-            assert (ROOT / f).is_file(), f
+            matches = list(ROOT.glob(f))
+            assert matches and all(p.is_file() for p in matches), f
 
 
 def test_console_page_found_in_checkout_and_when_installed(tmp_path, monkeypatch):

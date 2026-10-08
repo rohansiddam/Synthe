@@ -169,4 +169,4 @@ class World:
         return self.ledger()[idem]
 
     def chain(self):
-        return cm.verify_receipts(self.cfg.receipts_path, self.registry)
+        return cm.verify_receipts(self.cfg.receipts_path, self.registry, self.cfg.broker_id)

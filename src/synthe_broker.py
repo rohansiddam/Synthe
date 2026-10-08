@@ -513,7 +513,7 @@ class Broker:
     def op_receipts(self, args, isolation):
         limit = args.get("limit", 20)
         limit = limit if isinstance(limit, int) and 0 < limit <= 1000 else 20
-        chain = cm.verify_receipts(self.cfg.receipts_path, self._registry())
+        chain = cm.verify_receipts(self.cfg.receipts_path, self._registry(), self.cfg.broker_id)
         return {k: chain[k] for k in ("ok", "count", "head", "errors")} | {
             "receipts": chain["receipts"][-limit:]}
 

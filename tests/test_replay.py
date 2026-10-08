@@ -181,6 +181,28 @@ def test_replay_rejects_a_valid_receipt_for_another_identity(w, monkeypatch):
     assert w.remote_ref("feature/x") == commit
 
 
+def test_replay_refuses_a_matching_receipt_signed_by_another_registered_agent(w, monkeypatch):
+    srv = server(w)
+    packet = w.packet()
+    token = claimed(srv, packet)
+    commit = w.commit({"src/app.py": "issuer bound\n"})
+    args = proposal(w, packet, token, commit)
+    original = call(srv, "synthe_propose_effect", args, 2)
+    assert original["decision"] == "executed"
+    forged = {k: v for k, v in original.items() if k not in {"seq", "prev", "broker", "kid", "sig"}}
+    other = cm.append_receipt(w.cfg, w.keys["mallory"], forged)
+    # Every semantic field matches, but the signature belongs to a registered non-broker key.
+    assert other["broker"] == "mallory"
+    ledger = w.ledger()
+    ledger[packet["handoff"]["idempotency_key"]]["effects"]["push_branch"]["receipt_seq"] = other["seq"]
+    (w.tmp / "ledger.json").write_text(json.dumps(ledger))
+    monkeypatch.setattr(cm.GitPush, "commit", lambda *a, **k: pytest.fail("re-executed completed effect"))
+    refused = call(srv, "synthe_propose_effect", args, 3)
+    assert refused["decision"] == "denied"
+    assert codes(refused) == {"replay_receipt_unverified"}
+    assert w.remote_ref("feature/x") == commit
+
+
 def test_fingerprint_preserves_proto_named_effect_inputs():
     """A JavaScript object-prototype trap must not collapse distinct effects."""
     common = {"remote": "origin", "branch": "feature/x", "commit": "0" * 40}

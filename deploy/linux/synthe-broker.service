@@ -29,6 +29,7 @@ UMask=0077
 # Hardening: the broker needs its state dir, the socket dir and the network.
 NoNewPrivileges=yes
 ProtectSystem=strict
+ReadWritePaths=-/var/lib/synthe-shared/workspace
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

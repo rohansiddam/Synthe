@@ -10,6 +10,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 MUTATIONS = {
+    "replay trusts a non-broker signer": (
+        "src/synthe_commit.py",
+        '    seq = prior.get("receipt_seq")\n    chain = verify_receipts(cfg.receipts_path, registry, cfg.broker_id)',
+        '    seq = prior.get("receipt_seq")\n    chain = verify_receipts(cfg.receipts_path, registry)',
+    ),
     "changed effect accepted": (
         "src/synthe_commit.py",
         "    if not hmac.compare_digest(prior_fp, fingerprint):\n",

@@ -36,8 +36,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import synthe_client as scl  # noqa: E402
 
-DEFAULT_BROKER = "unix:///var/db/synthe-run/broker.sock"   # the macOS installer's (synthe_init.MACOS_SOCKET)
-DEFAULT_INBOX = "/Users/Shared/Synthe/inbox"                 # where synthe-task leaves signed tasks there
+DEFAULT_BROKER = "unix:///run/synthe/broker.sock" if sys.platform == "linux" else "unix:///var/db/synthe-run/broker.sock"
+DEFAULT_INBOX = "/var/lib/synthe-shared/inbox" if sys.platform == "linux" else "/Users/Shared/Synthe/inbox"
 HEADS = "refs/heads/"
 
 

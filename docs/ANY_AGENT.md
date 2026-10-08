@@ -1,63 +1,114 @@
-# Using Synthe with Any Agent
+# Any agent, or no AI
 
-Synthe's commit barrier protects your GitHub credentials and enforces exactly-once, human-approved pushes. While our default setup uses the OpenClaw gateway plugin to provide early "blocked" feedback, the security guarantee **does not depend on OpenClaw**. The broker isolates the token at the OS level.
+Synthe's enforcement boundary is the separate OS account and credential-holding broker, not a particular
+model. The agent proposes; a human approves the exact effect in a different account; the broker pushes.
+Do not put GitHub credentials, the approver key, sudo access, or a privileged container socket in the
+agent's account. A plugin alone does not make a deployment ENFORCED.
 
-You can use Synthe with **any MCP-compatible agent** (like Claude Code, Cursor, Cline, or Codex), or even no AI at all.
+## Prepare (safe for an assistant)
 
-## 1. What happens without the OpenClaw plugin
+From a checkout or an installed package with its setup assets:
 
-Without the plugin, there is no early "Tool call blocked" message when the agent tries a direct `git push`. Instead, the push will just **fail at GitHub** because the agent's OS account has no GitHub token and no push-capable SSH key.
+```sh
+synthe-init prepare --agent-kind none --agent-account worker --repo-url https://github.com/OWNER/REPO.git --branches 'agent/*' --allowed-paths 'src/**,tests/**'
+```
 
-The security wall is exactly the same:
-- The agent proposes changes through the Synthe MCP server.
-- The human approves the commit with their passphrase or Touch ID.
-- The broker pushes the change exactly once.
+`none` skips Node, OpenClaw installation, plugin configuration and gateway startup. It does **not** skip
+the isolated broker, separate agent account, signed task submission, scoped paths/branches, human approval
+or doctor checks. The default remains `--agent-kind openclaw`. `--agent` is the registered receiver ID;
+it is distinct from the integration kind and must match the broker's registry.
 
-## 2. Using an MCP agent (Claude Code, Cursor, Cline)
+The human—not an assistant—runs the generated command in their own terminal:
 
-To use an MCP agent, run it inside the restricted agent account (e.g., the `openclaw` user) created during the setup. 
+```sh
+bash ~/.synthe/finish-setup.sh
+```
 
-Configure your agent to connect to the Synthe MCP server using the configuration below. Replace `<your-agent-name>` with a recognizable name (e.g., `claude-code`, `cursor`).
+It prompts locally for credentials and uses sudo; never paste these secrets into an agent chat. macOS
+uses launchd. Linux uses systemd and requires system-wide Python 3.10+, venv, git, runuser and useradd;
+OpenClaw additionally needs system-wide Node/npm. Linux's new wrapper is a fresh-install path, refuses
+an existing broker, and is **not yet validated on a clean live Linux host**. It is not an Azure rollout.
+Check the generated script before running it. No change here deploys Studio, upgrades a gate or issues
+a model-reviewer grant.
 
-### Claude Code
+Enter the agent account (`sudo -iu worker`, typed by the human). On macOS:
 
-Add this to your Claude Code MCP configuration (usually `~/.claude.json` or `claude_mcp.json`):
+```sh
+export PATH="/Library/Synthe/venv/bin:$HOME/.local/bin:$PATH"
+```
+
+On Linux:
+
+```sh
+export PATH="/opt/synthe/bin:$HOME/.local/bin:$PATH"
+```
+
+In that account:
+
+```sh
+synthe-init doctor --repo ~/repo
+```
+
+No OpenClaw warning is expected for `none`. All credential/isolation failures still count. Read every
+check; a mode label is not proof against untested credential sources or root/administrator compromise.
+
+## Local MCP clients
+
+Run the client itself in the isolated agent account, not your founder account. Use a trusted installed
+executable's absolute path. The examples below are macOS; on Linux change the command to
+`/opt/synthe/bin/synthe-mcp` and the socket to `unix:///run/synthe/broker.sock`. Never configure
+`--broker broker.json`: that runs the broker inside the agent process instead of using isolation.
+
+Claude Code can use the [bundled adapter](../integrations/claude-code/README.md), or register local MCP:
+
+```sh
+claude mcp add --transport stdio synthe-local -- /Library/Synthe/venv/bin/synthe-mcp --broker-url unix:///var/db/synthe-run/broker.sock
+```
+
+Codex, in that account's `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.synthe_local]
+command = "/Library/Synthe/venv/bin/synthe-mcp"
+args = ["--broker-url", "unix:///var/db/synthe-run/broker.sock"]
+disabled_tools = ["synthe_submit_approval"]
+```
+
+Cursor (`~/.cursor/mcp.json`) or Cline (MCP Servers → Configure MCP Servers), merge this entry without
+overwriting existing configuration:
 
 ```json
 {
   "mcpServers": {
-    "synthe": {
-      "command": "synthe-mcp",
-      "args": [
-        "--broker-url",
-        "unix:///var/db/synthe-run/broker.sock",
-        "--as-receiver",
-        "<your-agent-name>"
-      ]
+    "synthe-local": {
+      "type": "stdio",
+      "command": "/Library/Synthe/venv/bin/synthe-mcp",
+      "args": ["--broker-url", "unix:///var/db/synthe-run/broker.sock"]
     }
   }
 }
 ```
 
-### Cursor / Cline
+Disable the approval-delivery tool in clients offering tool filters. It cannot forge a signature, but
+approval belongs in the human account. These are configuration examples, not claims of live end-to-end
+certification for every client. Restart/reconnect, inspect the advertised tools, then do one scratch task.
+Follow the [Synthe task workflow](../integrations/claude-code/skills/synthe/SKILL.md); never release UNKNOWN
+or treat missing evidence as permission to retry an effect.
 
-In your MCP settings UI, add a new server with:
-- **Type**: `command`
-- **Command**: `synthe-mcp`
-- **Arguments**: `--broker-url unix:///var/db/synthe-run/broker.sock --as-receiver <your-agent-name>`
+Formats checked 2026-10-08: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
+[Claude MCP](https://code.claude.com/docs/en/mcp), [Cursor MCP](https://cursor.com/docs/mcp),
+[Cline MCP](https://docs.cline.bot/mcp/mcp-overview).
 
-## 3. Testing without an AI
+## No AI needed
 
-If you want to verify the broker isolation and red-team the barrier yourself without using an AI agent, you can use our built-in stand-in scripts.
+In the human terminal, create a signed task:
 
-1. Switch to the agent's unprivileged account (e.g., `su - openclaw`).
-2. Run the agent stand-in script to propose a basic change:
-   ```bash
-   python3 scripts/agent_stand_in.py
-   ```
-3. Run the live red-team battery to verify the broker refuses all 33 attacks:
-   ```bash
-   python3 scripts/redteam_live.py
-   ```
+```sh
+synthe-task new "Make the scoped change" --branch agent/example
+```
 
-Because you are running inside the agent's account, the red-team script has no more access than the agent does, proving that the broker and the OS boundaries hold.
+In the separate worker terminal, edit and commit within that task's scope. With the broker-backed
+`synthe::` origin created by setup, follow [git push as a proposal](GIT_PUSH.md). A direct GitHub origin
+must remain unable to publish. The human reads and approves the staged diff with `synthe-approve` in
+their own terminal. A staged proposal is not a successful push: check its signed receipt. Use
+[standalone verification](VERIFY.md) to audit exported receipts, with an independently trusted public key.

@@ -1,5 +1,9 @@
 # Handoff Contract v0.5
 
+Setup adapters do not change this contract: [agent-neutral setup](docs/ANY_AGENT.md) and the Claude
+Code hook still require the broker's existing authority checks. [Standalone verification](docs/VERIFY.md)
+authenticates local receipt bytes and chain continuity, not provider-signed truth or dispatch authority.
+
 Every agent-to-agent handoff is an API boundary. The receiver validates the
 handoff *before* it starts work, and the checker fails closed: anything it
 cannot verify is a REJECT with a reason, never a silent pass.

@@ -25,9 +25,9 @@ Synthe. Forks must use a different name and logo.
 - **Contributors.** Whether contributions need a CLA or DCO: Rishab's and Rohan's, and AI-assisted
   code.
 - **FSL scope.** The "Competing Use" definition, as it applies to a hosted Synthe.
-- **The verifier.** Receipt verification currently lives in `synthe_commit.py` (FSL). The plan is an
-  Apache-2.0 standalone `synthe-verify`, so anyone can check receipts with no FSL code. Moving it is
-  an engineering task.
+- **The verifier.** `src/synthe_verify.py` is Apache-2.0, stdlib-only and independently packaged as
+  `synthe-verify`; it imports no broker code. See [VERIFY.md](docs/VERIFY.md). The broker retains its
+  internal verification checks under FSL.
 - **Trademark filing.** For "Synthe" and the logo, after a clearance search that the name is free to register.
 - **Packaging.** One `synthe` package holds both the Apache-2.0 and the FSL files, and the Apache MCP
   server and setup import the broker lazily, only in dev (in-process) mode. Each file names its license,

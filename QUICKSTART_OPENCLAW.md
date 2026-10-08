@@ -1,5 +1,8 @@
 # First approved OpenClaw push with Synthe (macOS)
 
+Using a different agent, Linux, or no AI? See [ANY_AGENT.md](docs/ANY_AGENT.md).
+Audit exported receipts without the broker with [synthe-verify](docs/VERIFY.md).
+
 At the end, OpenClaw proposes a push, you read the diff and approve it with Touch ID (or your
 passphrase fallback), and only then does Synthe push it. **ENFORCED** means the agent can't push on
 its own. It runs in its own Mac account with no GitHub login, and a hidden `_synthe` user holds the

@@ -113,7 +113,7 @@ def issue(home: Path, purpose: str, branch: str, key: dict, hours: float = 24) -
     """Build, sign and hand over one task with an unlocked approver key. Returns where the agent reads
     the signed packet. In separate-user mode the broker validates it and writes the task file."""
     setup = setup_of(home)
-    brokered = setup["mode"] == "macos-user"
+    brokered = setup["mode"] in ("macos-user", "linux-user")
     packet, task_file = build_task(home, purpose, branch, hours, write_task=not brokered)
     if key.get("agent") != packet["handoff"]["from"]:
         raise SystemExit(f"the approver key belongs to {key.get('agent')!r}, not {packet['handoff']['from']!r}")
@@ -167,8 +167,8 @@ def main(argv=None) -> int:
     for line in textwrap.wrap(prompt, 76):
         print(f"  {ui.c('│', 'muted')} {line}")
     print("\n" + ui.c("When it says the push is staged", "brand", bold=True))
-    print(ui.cmd("SYNTHE_BROKER=unix:///var/db/synthe-run/broker.sock synthe-approve"
-                 if setup_of(home)["mode"] == "macos-user" else "synthe-approve"))
+    print(ui.cmd(f"SYNTHE_BROKER={setup_of(home)['broker']} synthe-approve"
+                 if setup_of(home)["mode"] in ("macos-user", "linux-user") else "synthe-approve"))
     return 0
 
 

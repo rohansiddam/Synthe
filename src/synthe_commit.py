@@ -371,10 +371,13 @@ def append_receipt(cfg: BrokerConfig, key: dict, receipt: dict) -> dict:
     return receipt
 
 
-def verify_receipts(path: Path, registry: dict | None) -> dict:
+def verify_receipts(path: Path, registry: dict | None, broker_id: str | None = None) -> dict:
     """Offline verification: every signature against the broker's registered
     key, seq continuity, and each `prev` equal to the digest of the receipt
-    before it. Any edit, deletion or reordering breaks the chain."""
+    before it. Any edit, deletion or reordering breaks the chain.
+    `broker_id` pins the signer: without it, any agent in the registry could
+    sign a chain as itself and it would verify. Callers with a BrokerConfig
+    pass `cfg.broker_id`. The standalone, stricter check is synthe_verify.py."""
     receipts = _read_receipts(Path(path))
     errors, prev, report = [], None, []
     for i, r in enumerate(receipts):
@@ -390,6 +393,10 @@ def verify_receipts(path: Path, registry: dict | None) -> dict:
         want_prev = receipt_digest(prev) if prev is not None else None
         if r.get("prev") != want_prev:
             errors.append({"index": i, "seq": r.get("seq"), "error": "prev does not match the previous receipt"})
+            ok = False
+        if broker_id is not None and r.get("broker") != broker_id:
+            errors.append({"index": i, "seq": r.get("seq"),
+                           "error": f"signed as {r.get('broker')!r}, not by this broker ({broker_id})"})
             ok = False
         key = sc.find_key(registry, r.get("broker"), r.get("kid"))
         try:
@@ -469,7 +476,7 @@ def _completed_replay(cfg: BrokerConfig, registry: dict, h: dict, token: str,
             "the idempotency key is completed, but the prepared effect differs from the recorded effect; "
             "changed semantics never re-execute under the same identity")
     seq = prior.get("receipt_seq")
-    chain = verify_receipts(cfg.receipts_path, registry)
+    chain = verify_receipts(cfg.receipts_path, registry, cfg.broker_id)
     if not chain["ok"]:
         return None, hc._reject(
             "unknown", "replay_receipt_unverified",
@@ -2062,7 +2069,7 @@ UI_FILE = _ui_file()
 
 def console_state(cfg: BrokerConfig) -> dict:
     registry, _ = hc.load_registry(str(cfg.registry_path))
-    chain = verify_receipts(cfg.receipts_path, registry)
+    chain = verify_receipts(cfg.receipts_path, registry, cfg.broker_id)
     ledger = hc.load_ledger(cfg.ledger_path) if cfg.ledger_path else {}
     claims = []
     for k, e in (ledger or {}).items():
@@ -2206,7 +2213,7 @@ def cmd_receipts(a) -> int:
     if err:
         print(json.dumps(err, indent=2))
         return 2
-    report = verify_receipts(cfg.receipts_path, registry)
+    report = verify_receipts(cfg.receipts_path, registry, cfg.broker_id)
     if a.op == "show":
         for r in report["receipts"]:
             print(("ok  " if r.get("verified") else "BAD ") + summarize(r))

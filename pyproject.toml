@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,6 +28,7 @@ synthe-approver = "synthe_approver:main"
 synthe-init = "synthe_init:main"
 synthe-task = "synthe_task:main"
 git-remote-synthe = "synthe_git_remote:main"
+synthe-verify = "synthe_verify:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -35,7 +36,7 @@ py-modules = [
   "handoff_check", "synthe_crypto", "synthe_sign", "synthe_plan", "synthe_commit",
   "synthe_broker", "synthe_client", "synthe_mcp", "synthe_a2a", "synthe_approve",
   "synthe_init", "synthe_task", "synthe_ui", "synthe_git_remote", "synthe_touchid",
-  "synthe_lane_templates", "synthe_approver",
+  "synthe_lane_templates", "synthe_approver", "synthe_verify",
 ]
 
 [tool.setuptools.data-files]
@@ -47,6 +48,20 @@ py-modules = [
   "integrations/openclaw/plugin/broker.ts",
 ]
 "share/synthe/openclaw/skill/synthe" = ["integrations/openclaw/skill/synthe/SKILL.md"]
+# Setup must also work from a wheel, outside a source checkout. These are product assets only.
+"share/synthe/source/src" = ["src/*.py", "src/*.html"]
+"share/synthe/source/deploy/macos" = ["deploy/macos/*.sh"]
+"share/synthe/source/deploy/linux" = ["deploy/linux/install.sh", "deploy/linux/finish.sh", "deploy/linux/*.service"]
+"share/synthe/source/integrations/macos/touchid" = ["integrations/macos/touchid/*.swift"]
+"share/synthe/source/integrations/openclaw/plugin" = [
+  "integrations/openclaw/plugin/package.json", "integrations/openclaw/plugin/openclaw.plugin.json",
+  "integrations/openclaw/plugin/index.ts", "integrations/openclaw/plugin/policy.ts", "integrations/openclaw/plugin/broker.ts",
+]
+"share/synthe/source/integrations/openclaw/skill/synthe" = ["integrations/openclaw/skill/synthe/SKILL.md"]
+"share/synthe/claude-code/.claude-plugin" = ["integrations/claude-code/.claude-plugin/plugin.json"]
+"share/synthe/claude-code" = ["integrations/claude-code/.mcp.json", "integrations/claude-code/README.md"]
+"share/synthe/claude-code/hooks" = ["integrations/claude-code/hooks/hooks.json", "integrations/claude-code/hooks/pre_tool_use.py"]
+"share/synthe/claude-code/skills/synthe" = ["integrations/claude-code/skills/synthe/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

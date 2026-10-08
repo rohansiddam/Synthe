@@ -224,6 +224,9 @@ def broker_address(home: Path) -> str:
 MACOS_STATE = Path("/var/db/synthe")
 MACOS_SOCKET = "unix:///var/db/synthe-run/broker.sock"
 MACOS_WORKSPACE = Path("/Users/Shared/Synthe/workspace")
+LINUX_STATE = Path("/var/lib/synthe")
+LINUX_SOCKET = "unix:///run/synthe/broker.sock"
+LINUX_WORKSPACE = Path("/var/lib/synthe-shared/workspace")
 
 
 GITHUB_TOKEN_PREFIXES = ("github_pat_", "ghp_", "gho_", "ghu_", "ghs_")
@@ -249,14 +252,19 @@ def prompt_token(stage: Path, repo_url: str, read=None) -> Path:
 
 
 def prepare(home: Path, *, repo_url: str, branches: list, allowed_paths: list, agent_account: str,
-            approver: str, python: str, script_path: Path, node: Path = Path("/opt/homebrew/bin/node")) -> Path:
+            approver: str, python: str, script_path: Path, node: Path = Path("/opt/homebrew/bin/node"),
+            agent_kind: str = "openclaw") -> Path:
     """What an agent may do for you: check everything that can be checked without a secret, then
     write the one command you run (finish-setup.sh). It asks for your passphrase, your GitHub token
     and your Mac password, in that order. No secret passes through here."""
     _check_scope(branches, allowed_paths)
+    _check_agent_kind(agent_kind)
     problems = []
-    if sys.platform != "darwin":
-        problems.append("this setup is for macOS")
+    if sys.platform not in ("darwin", "linux"):
+        problems.append("this setup requires macOS or Linux (systemd)")
+    linux = sys.platform == "linux"
+    if linux and not shutil.which("systemctl"):
+        problems.append("Linux setup requires systemd")
     if os.geteuid() == 0:
         problems.append("run prepare as yourself, not root")
     if agent_account == approver:
@@ -264,7 +272,11 @@ def prepare(home: Path, *, repo_url: str, branches: list, allowed_paths: list, a
                         f"would let the agent push. Pick another name, e.g. openclaw")
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", agent_account or ""):
         problems.append(f"{agent_account!r} is not a valid macOS account name")
-    if not node.exists():
+    if agent_account in ("root", "synthe", "_synthe"):
+        problems.append("the agent must not be root or the broker account")
+    if linux and agent_kind == "openclaw" and not (shutil.which("node") and shutil.which("npm")):
+        problems.append("install Node and npm system-wide for OpenClaw, or choose --agent-kind none")
+    if not linux and agent_kind == "openclaw" and not node.exists():
         problems.append(f"Node isn't at {node}: run `brew install node` (the agent's account needs it for OpenClaw)")
     if not shutil.which("git"):
         problems.append("git is missing: run `xcode-select --install`")
@@ -275,17 +287,19 @@ def prepare(home: Path, *, repo_url: str, branches: list, allowed_paths: list, a
     os.chmod(home, 0o700)
     q = lambda v: "'" + str(v).replace("'", "'\\''") + "'"  # noqa: E731
     finish = home / "finish-setup.sh"
+    isolation = "linux-user" if linux else "macos-user"
+    enforce = "enforce-linux.sh" if linux else "enforce-macos.sh"
     finish.write_text(f"""#!/bin/bash
 # Finish setting up Synthe (written by synthe-init prepare; holds no secret). Run it yourself, in a
-# terminal: it asks for your approval passphrase, your GitHub token (hidden) and your Mac password.
+# terminal: it asks for your approval passphrase, your GitHub token (hidden) and your admin password.
 set -euo pipefail
 cd {q(root)}
-{q(python)} {q(script_path)} setup --isolation macos-user --repo-url {q(repo_url)} \\
+{q(python)} {q(script_path)} setup --isolation {isolation} --repo-url {q(repo_url)} \\
     --branches {q(",".join(branches))} --allowed-paths {q(",".join(allowed_paths))} \\
-    --agent-user {q(agent_account)} --github-token-prompt --no-openclaw --home {q(home)}
+    --agent-user {q(agent_account)} --agent-kind {q(agent_kind)} --github-token-prompt --no-openclaw --home {q(home)}
 echo
-echo "Now the one admin step (your Mac password):"
-sudo bash {q(home / "enforce-macos.sh")}
+echo "Now the one admin step (your admin password):"
+sudo bash {q(home / enforce)}
 """)
     os.chmod(finish, 0o700)
     return finish
@@ -311,7 +325,7 @@ def check_token_file(token_file: Path, repo_url: str) -> None:
 def source_root() -> Path:
     """The Synthe source directory (it holds deploy/macos/install.sh and src/): next to this file in a
     checkout or an editable install, else the directory you run synthe-init from."""
-    for c in (Path(__file__).resolve().parent.parent, Path.cwd()):
+    for c in (Path(__file__).resolve().parent.parent, Path(sys.prefix) / "share/synthe/source", Path.cwd()):
         if (c / "deploy" / "macos" / "install.sh").is_file() and (c / "src" / "synthe_commit.py").is_file():
             return c
     raise SystemExit("run synthe-init setup from the Synthe source directory (the one with deploy/macos/install.sh)")
@@ -329,12 +343,14 @@ def base_python() -> str | None:
 
 def stage_macos(home: Path, *, repo_url: str, branches: list, allowed_paths: list, approver: str,
                 approver_pub: dict, agent: str, agent_user: str, token_file: Path | None, repo_root: Path,
-                workspace: Path = MACOS_WORKSPACE, base_python: str | None = "auto") -> Path:
+                workspace: Path = MACOS_WORKSPACE, base_python: str | None = "auto",
+                agent_kind: str = "openclaw") -> Path:
     """Everything the one sudo step needs, prepared as you: the registry and config to merge into the
     broker (which deploy/macos/install.sh creates as the hidden user _synthe), a workspace both you
     and the broker can read, setup.json, and the script to run with sudo. Returns the script's path.
     No secret is copied: the script reads the token file you named, as root, and installs it 0600."""
     _check_scope(branches, allowed_paths)
+    _check_agent_kind(agent_kind)
     if base_python == "auto":
         base_python = globals()["base_python"]()
     if token_file is not None:
@@ -357,7 +373,8 @@ def stage_macos(home: Path, *, repo_url: str, branches: list, allowed_paths: lis
     os.chmod(workspace, 0o755)  # the broker (_synthe) reads task files here; it never writes them
     write_setup(home, {"mode": "macos-user", "broker": MACOS_SOCKET, "registry": str(stage / "registry.json"),
                        "broker_config": str(MACOS_STATE / "broker.json"), "workspace": str(workspace),
-                       "remote": {"url": repo_url, "branches": branches}, "receiver": agent})
+                       "remote": {"url": repo_url, "branches": branches}, "receiver": agent,
+                       "agent_kind": agent_kind})
     q = lambda v: "'" + str(v).replace("'", "'\\''") + "'"  # noqa: E731  (single-quote for the shell)
     script = home / "enforce-macos.sh"
     script.write_text(f"""#!/bin/bash
@@ -370,6 +387,7 @@ set -euo pipefail
 [ "$(id -u)" -eq 0 ] || {{ echo "run it with sudo: sudo bash $0" >&2; exit 2; }}
 REPO={q(repo_root)}
 AGENT_USER={q(agent_user)}
+AGENT_KIND={q(agent_kind)}
 STAGE={q(stage)}
 TOKEN={q(token_file) if token_file else "''"}
 TOKEN_STAGED={1 if token_file is not None and token_file.parent == stage.resolve() else 0}
@@ -405,17 +423,18 @@ if [ "$SEPARATE" = 1 ]; then
   bash "$REPO/deploy/macos/add-agent-user.sh" --agent-user "$AGENT_USER" --approver-user "$APPROVER"
   cd /  # the agent's account can't enter yours; don't start its processes there
   AS_AGENT=(sudo -u "$AGENT_USER" -H env "PATH=/Users/$AGENT_USER/.local/bin:/opt/homebrew/bin:/usr/bin:/bin")
-  if [ ! -x "/Users/$AGENT_USER/.local/bin/openclaw" ]; then
+  if [ "$AGENT_KIND" = openclaw ] && [ ! -x "/Users/$AGENT_USER/.local/bin/openclaw" ]; then
     echo "Installing OpenClaw {OPENCLAW_VERSION} for $AGENT_USER..."
     "${{AS_AGENT[@]}}" npm install -g -q {q("openclaw@" + OPENCLAW_VERSION)} --prefix "/Users/$AGENT_USER/.local"
   fi
-  "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-init" agent-setup --yes
+  "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-init" agent-setup --agent {q(agent)} --agent-kind "$AGENT_KIND" --yes
   # git finds remote helpers on PATH: with git-remote-synthe there, a plain `git push` in the agent's clone
   # (whose origin is Synthe) becomes a proposal, for any agent or tool, not only OpenClaw.
   "${{AS_AGENT[@]}}" mkdir -p "/Users/$AGENT_USER/.local/bin"
   "${{AS_AGENT[@]}}" ln -sf "$APP/venv/bin/git-remote-synthe" "/Users/$AGENT_USER/.local/bin/git-remote-synthe"
   # The gateway (where the plugin acts) runs as the agent's account, started by launchd: nobody has to
   # keep a window open. It restarts if it stops; its log is in the agent's home.
+  if [ "$AGENT_KIND" = openclaw ]; then
   GW_PLIST=/Library/LaunchDaemons/com.synthe.openclaw-gateway.plist
   cat > "$GW_PLIST" <<GWEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -443,6 +462,7 @@ GWEOF
   launchctl bootout system "$GW_PLIST" 2>/dev/null || true
   launchctl bootstrap system "$GW_PLIST" \\
     || echo "(couldn't start the gateway service; start it yourself: sudo -iu $AGENT_USER, then openclaw gateway run)"
+  fi
   CLONE="/Users/$AGENT_USER/repo"
   # Through the broker: the agent's account has no GitHub credential, not even to read (private repos too).
   [ -d "$CLONE/.git" ] || "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-client" --broker {q(MACOS_SOCKET)} clone "$CLONE" >/dev/null \\
@@ -450,10 +470,16 @@ GWEOF
   echo
   "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-init" doctor --repo "$CLONE" || true
   echo
+  if [ "$AGENT_KIND" = openclaw ]; then
   echo "Last step, yours: give OpenClaw its model. Its gateway (where the plugin acts) is already running."
   echo "  sudo -iu $AGENT_USER"
   echo '  export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && openclaw onboard'
   echo '  export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && cd ~/repo && openclaw tui'
+  else
+    echo "Ready for any agent (or no AI) in $AGENT_USER's account; see docs/ANY_AGENT.md."
+    echo "  sudo -iu $AGENT_USER"
+    echo '  export PATH="/Library/Synthe/venv/bin:$HOME/.local/bin:$PATH" && cd ~/repo'
+  fi
 else
   echo
   echo "The broker runs as _synthe (uid $(id -u _synthe)). Next, as yourself:"
@@ -461,6 +487,42 @@ else
   [ -n "$TOKEN" ] && echo "  rm $TOKEN        (the broker holds its own copy now)" || true
 fi
 """)
+    os.chmod(script, 0o700)
+    return script
+
+
+def stage_linux(home: Path, *, repo_url: str, branches: list, allowed_paths: list, approver: str,
+                approver_pub: dict, agent: str, agent_user: str, token_file: Path | None,
+                repo_root: Path, agent_kind: str = "openclaw") -> Path:
+    """Stage public configuration only. The human runs the generated root installer; never run it here."""
+    import shlex
+    _check_scope(branches, allowed_paths)
+    _check_agent_kind(agent_kind)
+    for account in (agent_user, approver):
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", account or "") or account in ("root", "synthe", "_synthe"):
+            raise SystemExit("a separate ordinary agent and approver account are required")
+    if agent_user == approver:
+        raise SystemExit("the agent's account must not be yours")
+    if not (repo_root / "deploy/linux/finish.sh").is_file():
+        raise SystemExit("Linux installer not found in source tree")
+    stage = home / "linux-stage"
+    stage.mkdir(parents=True, exist_ok=True)
+    os.chmod(stage, 0o700)
+    if token_file is not None:
+        token_file = token_file.expanduser().resolve()
+        check_token_file(token_file, repo_url)
+    _write_private(stage / "registry.json", json.dumps(build_registry(approver, approver_pub, agent, allowed_paths)))
+    remote = {"url": repo_url, "branches": branches, **readable(branches),
+              **({"token_file": "github.token"} if token_file else {})}
+    _write_private(stage / "config-patch.json", json.dumps({"workspace": str(LINUX_WORKSPACE),
+                   "receiver": agent, "remote": remote, "clients": [approver, agent_user]}))
+    write_setup(home, {"mode": "linux-user", "broker": LINUX_SOCKET, "registry": str(stage / "registry.json"),
+                       "broker_config": str(LINUX_STATE / "broker.json"), "workspace": str(LINUX_WORKSPACE),
+                       "remote": {"url": repo_url, "branches": branches}, "receiver": agent, "agent_kind": agent_kind})
+    args = [str(repo_root / "deploy/linux/finish.sh"), str(stage), agent_user, approver, agent_kind, agent,
+            str(token_file) if token_file else "", str(int(token_file is not None and token_file.parent == stage.resolve())), "v1"]
+    script = home / "enforce-linux.sh"
+    script.write_text("#!/bin/bash\nset -euo pipefail\nexec bash " + shlex.join(args) + "\n")
     os.chmod(script, 0o700)
     return script
 
@@ -478,6 +540,13 @@ def apply_config(state: Path, stage: Path) -> dict:
     patch = json.loads((stage / "config-patch.json").read_text())
     if (cfg.get("isolation") or {}).get("mode") != "user":
         raise SystemExit(f"{cfg_path}: isolation mode is not 'user'; refusing to change it")
+    if "clients" in patch:
+        clients = patch["clients"]
+        if not isinstance(clients, list) or len(clients) != 2 or any(
+                not isinstance(u, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", u)
+                or u in ("root", "synthe", "_synthe") for u in clients) or clients[0] == clients[1]:
+            raise SystemExit("invalid isolated client accounts")
+        cfg["isolation"]["clients"] = clients
     cfg["workspace"] = patch["workspace"]
     cfg["receiver"] = patch["receiver"]
     cfg["ledger"] = "ledger.sqlite3"
@@ -598,18 +667,27 @@ def configure_gateway(oc) -> list:
     return steps
 
 
-def agent_setup(home: Path, oc, agent: str, assume_yes: bool) -> int:
+def _check_agent_kind(agent_kind: str) -> None:
+    if agent_kind not in ("openclaw", "none"):
+        raise SystemExit("agent-kind must be openclaw or none")
+
+
+def agent_setup(home: Path, oc, agent: str, assume_yes: bool, agent_kind: str = "openclaw") -> int:
     """The agent's own macOS account (a different user from the approver): point OpenClaw at the
     separate-user broker. This account gets no approver key and no GitHub token; it only proposes."""
+    _check_agent_kind(agent_kind)
     if (home / "approver.key.json").exists():
         raise SystemExit(f"{home} holds an approver key: run agent-setup in the agent's own account, not yours")
-    if oc is None:
+    if agent_kind == "openclaw" and oc is None:
         raise SystemExit("OpenClaw was not found in this account; install it here first")
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
-    write_setup(home, {"mode": "macos-user", "role": "agent", "broker": MACOS_SOCKET,
-                       "workspace": str(MACOS_WORKSPACE), "receiver": agent})
-    steps = wire_openclaw(oc, home, assume_yes) + configure_gateway(oc)
+    linux = sys.platform == "linux"
+    write_setup(home, {"mode": "linux-user" if linux else "macos-user", "role": "agent",
+                       "broker": LINUX_SOCKET if linux else MACOS_SOCKET,
+                       "workspace": str(LINUX_WORKSPACE if linux else MACOS_WORKSPACE),
+                       "receiver": agent, "agent_kind": agent_kind})
+    steps = wire_openclaw(oc, home, assume_yes) + configure_gateway(oc) if agent_kind == "openclaw" else []
     ui = sui.UI()
     print(ui.header("agent setup"))
     print_wiring(ui, steps)
@@ -726,7 +804,14 @@ def run_doctor(home: Path, oc: OpenClaw | None, repo: str | None = None, broker:
         checks += scl.doctor(client, repo=repo, git_remote="origin" if repo else None)
     except scl.BrokerError as e:
         checks.append({"status": "FAIL", "check": "broker isolation", "detail": f"no broker answers: {e}"})
-    checks += openclaw_checks(oc)
+    agent_kind = read_setup(home).get("agent_kind", "openclaw")
+    if agent_kind == "openclaw":
+        checks += openclaw_checks(oc)
+    elif agent_kind == "none":
+        checks.append({"status": "PASS", "check": "agent integration",
+                       "detail": "no agent-specific hook selected; enforcement depends on the OS account and broker checks"})
+    else:
+        checks.append({"status": "FAIL", "check": "agent integration", "detail": "unknown agent_kind in setup.json"})
     return {"level": level(checks), "checks": checks}
 
 
@@ -803,8 +888,9 @@ def main(argv=None) -> int:
     s.add_argument("--github-token-file", help="a file holding a fine-grained token (Contents: write) for the repo")
     s.add_argument("--approver", default=os.environ.get("USER") or "human", help="your name as approver")
     s.add_argument("--agent", default="openclaw", help="the agent's id")
+    s.add_argument("--agent-kind", choices=["openclaw", "none"], default="openclaw")
     s.add_argument("--home", default="~/.synthe")
-    s.add_argument("--isolation", choices=["dev", "macos-user"], default="dev",
+    s.add_argument("--isolation", choices=["dev", "macos-user", "linux-user"], default="dev",
                    help="dev: the broker runs as you (GUARDED at best). macos-user: prepare the one sudo step "
                         "that runs it as its own user (ENFORCED)")
     s.add_argument("--agent-user", default=os.environ.get("USER"), help="macos-user: the macOS user OpenClaw runs as")
@@ -814,12 +900,14 @@ def main(argv=None) -> int:
     s.add_argument("--yes", action="store_true", help="install the OpenClaw plugin without OpenClaw asking you")
     ab = sub.add_parser("about", help="what Synthe is (with the logo's intro)")
     ab.add_argument("--style", choices=["lock", "draw", "spin"], default="lock", help="which intro to play")
-    pr = sub.add_parser("prepare", help="(safe for an agent) check this Mac and write the one command you run "
+    pr = sub.add_parser("prepare", help="(safe for an agent) check this machine and write the one command you run "
                                         "to finish setup")
     pr.add_argument("--repo-url", required=True)
     pr.add_argument("--branches", default="agent/*")
     pr.add_argument("--allowed-paths", required=True)
     pr.add_argument("--agent-account", default="openclaw", help="the macOS account the agent runs as (created if missing)")
+    pr.add_argument("--agent-kind", choices=["openclaw", "none"], default="openclaw",
+                    help="none: any agent or no AI; do not require Node or install OpenClaw")
     pr.add_argument("--home", default="~/.synthe")
     d = sub.add_parser("doctor", help="report the enforcement level and every check")
     d.add_argument("--home", default="~/.synthe")
@@ -832,6 +920,7 @@ def main(argv=None) -> int:
                                            "broker (no keys, no token)")
     g.add_argument("--home", default="~/.synthe")
     g.add_argument("--agent", default="openclaw", help="the agent's id (the broker's receiver)")
+    g.add_argument("--agent-kind", choices=["openclaw", "none"], default="openclaw")
     g.add_argument("--yes", action="store_true", help="install the OpenClaw plugin without OpenClaw asking you")
     t = sub.add_parser("touchid", help="approve with Touch ID: make a Secure Enclave key and register it")
     t.add_argument("--home", default="~/.synthe")
@@ -863,18 +952,18 @@ def main(argv=None) -> int:
     if a.cmd == "prepare":
         finish = prepare(home, repo_url=a.repo_url, branches=_csv(a.branches), allowed_paths=_csv(a.allowed_paths),
                          agent_account=a.agent_account, approver=os.environ.get("USER") or "",
-                         python=sys.executable, script_path=Path(__file__).resolve())
+                         python=sys.executable, script_path=Path(__file__).resolve(), agent_kind=a.agent_kind)
         ui = sui.UI()
         print(ui.header("prepare"))
-        print(ui.check("PASS", "this Mac is ready", "macOS, Node, git, the source folder, the scope", 20))
-        print("\nAsk the person at this Mac to run this in their own terminal:")
+        print(ui.check("PASS", "preflight checks passed", "platform, selected agent prerequisites, git, source, scope", 20))
+        print("\nAsk the person at this machine to run this in their own terminal:")
         print(ui.cmd(f"bash {finish}") if ui.color else f"\n  bash {finish}\n")
         print(("\n" if ui.color else "") + "It asks for their approval passphrase, the GitHub token (hidden) and their "
-              "Mac password.\n" + ui.c("Never ask for or handle any of those yourself.", "warn", bold=True))
+              "admin password.\n" + ui.c("Never ask for or handle any of those yourself.", "warn", bold=True))
         return 0
 
     if a.cmd == "agent-setup":
-        return agent_setup(home, oc, a.agent, a.yes)
+        return agent_setup(home, oc, a.agent, a.yes, a.agent_kind)
 
     if a.cmd == "serve":
         cfg = home / "broker" / "broker.json"
@@ -910,18 +999,21 @@ def main(argv=None) -> int:
     _check_scope(_csv(a.branches), _csv(a.allowed_paths))
     if token is not None:
         check_token_file(token, a.repo_url)
-    root = source_root() if a.isolation == "macos-user" else None
+    isolated = a.isolation in ("macos-user", "linux-user")
+    root = source_root() if isolated else None
     if a.github_token_prompt:
-        if a.isolation != "macos-user":
-            raise SystemExit("--github-token-prompt is for --isolation macos-user")
-        token = prompt_token(home / "macos-stage", a.repo_url)
+        if not isolated:
+            raise SystemExit("--github-token-prompt requires separate-user isolation")
+        token = prompt_token(home / ("linux-stage" if a.isolation == "linux-user" else "macos-stage"), a.repo_url)
     pub = approver_public_key(home, a.approver)
     script = None
-    if a.isolation == "macos-user":
-        script = stage_macos(home, repo_url=a.repo_url, branches=_csv(a.branches),
+    if isolated:
+        stage_fn = stage_linux if a.isolation == "linux-user" else stage_macos
+        script = stage_fn(home, repo_url=a.repo_url, branches=_csv(a.branches),
                              allowed_paths=_csv(a.allowed_paths), approver=a.approver, approver_pub=pub,
-                             agent=a.agent, agent_user=a.agent_user, token_file=token, repo_root=root)
-        summary = {"isolation": "macos-user", "script": str(script), "repo_url": a.repo_url}
+                             agent=a.agent, agent_user=a.agent_user, token_file=token, repo_root=root,
+                             agent_kind=a.agent_kind)
+        summary = {"isolation": a.isolation, "script": str(script), "repo_url": a.repo_url}
     else:
         summary = write_broker(home, repo_url=a.repo_url, branches=_csv(a.branches),
                                allowed_paths=_csv(a.allowed_paths), approver=a.approver, approver_pub=pub,
@@ -929,7 +1021,8 @@ def main(argv=None) -> int:
         if token:
             print(f"  The broker now holds the GitHub token. Delete {token} (it is still a plaintext copy).")
     steps = []
-    if not a.no_openclaw:
+    write_setup(home, {**read_setup(home), "agent_kind": a.agent_kind})
+    if not a.no_openclaw and a.agent_kind == "openclaw":
         if oc is None:
             print("  OpenClaw not found: skipping its wiring (install it, then run synthe-init setup again)")
         else:
@@ -937,7 +1030,7 @@ def main(argv=None) -> int:
             print_wiring(ui, steps)
     report = {"setup": summary, "openclaw": [{"step": n, "ok": ok} for n, ok, _ in steps]}
     (home / "setup-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    approve = f"SYNTHE_BROKER={MACOS_SOCKET if script else broker_address(home)} synthe-approve"
+    approve = f"SYNTHE_BROKER={broker_address(home)} synthe-approve"
     task = 'synthe-task new "what to do" --branch agent/<name>'
     if script is not None and a.github_token_prompt:  # finish-setup runs the admin step next, by itself
         print(("\n" if ui.color else "") + ui.check("PASS", "your key and the token are staged",

@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash|mcp__.*__synthe_submit_approval|mcp__.*__github_publish",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pre_tool_use.py\"",
+        "timeout": 5
+      }]
+    }]
+  }
+}

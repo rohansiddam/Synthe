@@ -118,7 +118,7 @@ MUTATIONS = {
     ),
     "task CLI bypasses broker": (
         "src/synthe_task.py",
-        '    brokered = setup["mode"] == "macos-user"\n',
+        '    brokered = setup["mode"] in ("macos-user", "linux-user")\n',
         "    brokered = False\n",
     ),
 }

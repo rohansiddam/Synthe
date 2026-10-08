@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LicenseRef-FSL-1.1-ALv2
+[Unit]
+Description=Synthe OpenClaw gateway (agent account, no broker credentials)
+After=network-online.target synthe-broker.service
+[Service]
+User=@AGENT@
+Environment=HOME=@HOME@
+Environment=PATH=/opt/synthe/bin:@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=@HOME@
+ExecStart=@HOME@/.local/bin/openclaw gateway run
+Restart=on-failure
+NoNewPrivileges=yes
+[Install]
+WantedBy=multi-user.target

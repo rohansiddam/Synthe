@@ -232,14 +232,16 @@ def test_task_submission_refuses_paths_symlinks_and_conflicting_bytes(staged):
     assert symlink.value.code == "task_path_invalid" and list(redirected.iterdir()) == []
 
 
-def test_synthe_task_cli_routes_macos_tasks_through_the_broker(staged, monkeypatch):
+@pytest.mark.parametrize("mode,socket", [("macos-user", si.MACOS_SOCKET), ("linux-user", si.LINUX_SOCKET)])
+def test_synthe_task_cli_routes_macos_tasks_through_the_broker(staged, monkeypatch, mode, socket):
     home = staged["home"]
+    si.write_setup(home, {**si.read_setup(home), "mode": mode, "broker": socket})
     key = ss.load_key(str(home / "approver.key.json"), passphrase=PASS, require_encrypted=True)
     seen = {}
 
     class Client:
         def __init__(self, url):
-            assert url == si.MACOS_SOCKET
+            assert url == socket
 
         def call(self, op, **args):
             seen.update({"op": op, **args})
@@ -283,7 +285,7 @@ def test_agent_setup_wires_openclaw_with_no_key_and_no_token(tmp_path):
     assert si.agent_setup(home, oc, "openclaw", assume_yes=True) == 0
     setup = json.loads((home / "setup.json").read_text())
     assert setup == {"mode": "macos-user", "role": "agent", "broker": si.MACOS_SOCKET,
-                     "workspace": str(si.MACOS_WORKSPACE), "receiver": "openclaw"}
+                     "workspace": str(si.MACOS_WORKSPACE), "receiver": "openclaw", "agent_kind": "openclaw"}
     assert sorted(p.name for p in home.iterdir()) == ["setup.json"]          # no key, no token, nothing else
     assert home.stat().st_mode & 0o777 == 0o700
     mcp = next(c for c in oc.calls if c[:2] == ("mcp", "add"))
@@ -438,7 +440,7 @@ def test_the_admin_step_creates_the_agents_account_before_installing_and_drops_t
     assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
     assert TOKEN_TEXT not in text and "TOKEN_STAGED=1" in text
     assert text.index("sysadminctl -addUser") < text.index("install.sh\" --agent-user")   # the account first
-    for step in ("add-agent-user.sh", "agent-setup --yes", f"openclaw@{si.OPENCLAW_VERSION}", "doctor --repo",
+    for step in ("add-agent-user.sh", "agent-setup --agent", f"openclaw@{si.OPENCLAW_VERSION}", "doctor --repo",
                  'chmod 700 "/Users/$APPROVER"', "cd /",
                  'ln -sf "$APP/venv/bin/git-remote-synthe" "/Users/$AGENT_USER/.local/bin/git-remote-synthe"',
                  "com.synthe.openclaw-gateway", "<key>UserName</key><string>$AGENT_USER</string>",

@@ -11,6 +11,11 @@ are bound to this handoff, and that this unit of work hasn't already been claime
 
 A signature proves **who said it**. It never proves **that it's safe**.
 
+The [standalone verifier](docs/VERIFY.md) pins the issuer and optionally previously trusted chain
+checkpoints. An unanchored valid prefix may be rolled back; a local signature does not establish an
+external effect. [Generic/Claude setup](docs/ANY_AGENT.md) keeps OS separation: shell hooks are bypassable
+UX guards, not the credential wall. The new Linux setup path still needs a clean-host acceptance run.
+
 ## Assets
 
 | Asset | Where it lives | If it's compromised |
@@ -216,7 +221,6 @@ isolation), never in an agent's; a delegate key an agent can read is an agent ap
 without a delegate has no per-push reviewer at all: it trades review for speed within its limits.
 Content proposals are not delegated yet (they wait for a human).
 
->>>>>>> release/v0.7.1-clawhub
 ## Out of scope: what it does NOT stop (be honest about these)
 
 1. **A compromised or prompt-injected sender.** It produces a perfectly valid,
