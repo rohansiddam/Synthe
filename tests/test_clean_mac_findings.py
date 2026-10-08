@@ -162,3 +162,20 @@ def test_the_agent_is_told_base_is_a_branch_never_a_commit():
 def test_the_quickstart_warns_that_onboarding_opens_an_embedded_chat_the_plugin_skips():
     qs = (ROOT / "QUICKSTART_OPENCLAW.md").read_text()
     assert "local embedded" in qs and "Skip for now" in qs and "ws://127.0.0.1" in qs
+
+
+# --- gateway auto-start (live on a founder's Mac 2026-10-07; fresh-account behavior checked with an empty
+# OPENCLAW_HOME: no config -> exits 78 "Missing config"; with setup's gateway settings it starts before
+# onboarding, and onboarding's model change is hot-reloaded without a restart) ----------------------
+
+def test_a_failed_gateway_service_start_doesnt_stop_setup_before_the_doctor(tmp_path):
+    text = _stage(tmp_path, base_python=None)
+    i = text.index('launchctl bootstrap system "$GW_PLIST"')
+    assert text[i:i + 200].split("\n")[1].strip().startswith("|| echo"), "a failed bootstrap must not abort setup"
+    assert i < text.index("doctor --repo")
+
+
+def test_the_quickstart_no_longer_asks_for_a_gateway_window_or_a_token():
+    qs = (ROOT / "QUICKSTART_OPENCLAW.md").read_text()
+    assert "openclaw gateway run" not in qs and "auth-token" not in qs
+    assert "Gateway service:** skip installing it" in qs

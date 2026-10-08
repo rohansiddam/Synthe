@@ -16,6 +16,12 @@
   public data). Pure-Python *signing* is not constant-time: fine for
   development and CI fixtures, but install `cryptography` (or sign with an
   HSM/KMS) for production keys.
+- ES256 (ECDSA P-256 with SHA-256, signature r||s) for approvals only: the
+  Touch ID key (integrations/macos/touchid) lives in a Mac's Secure Enclave,
+  which signs P-256 and nothing else. Verify-only here; pure Python unless
+  `cryptography` is installed. A key's algorithm comes from the registry,
+  never from the signature or approval, so one can't be passed off as the
+  other.
 
 Encodings: keys and signatures are unpadded base64url strings.
 """
@@ -28,6 +34,8 @@ import math
 import os
 
 ALG = "Ed25519"
+ALG_ES256 = "ES256"
+APPROVAL_ALGS = (ALG, ALG_ES256)  # packets and receipts stay Ed25519
 PACKET_SIG_DOMAIN = "synthe/handoff-signature/v1"
 APPROVAL_SIG_DOMAIN = "synthe/approval-signature/v1"
 RECEIPT_SIG_DOMAIN = "synthe/effect-receipt/v1"
@@ -293,3 +301,122 @@ def usable_keys(registry: dict | None, agent_id: str) -> list:
         except Exception:
             continue
     return kids
+
+
+# --------------------------------------------------------------------------
+# ES256 (ECDSA over P-256, SHA-256): verification for Secure Enclave approval keys
+
+_P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+_P256_A = _P256_P - 3
+_P256_B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+_P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+_P256_G = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+           0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5)
+
+
+def _p256_on_curve(P) -> bool:
+    x, y = P
+    return 0 <= x < _P256_P and 0 <= y < _P256_P and (y * y - (x * x * x + _P256_A * x + _P256_B)) % _P256_P == 0
+
+
+def _p256_add(P, Q):
+    if P is None:
+        return Q
+    if Q is None:
+        return P
+    (x1, y1), (x2, y2) = P, Q
+    if x1 == x2:
+        if (y1 + y2) % _P256_P == 0:
+            return None
+        lam = (3 * x1 * x1 + _P256_A) * pow(2 * y1, -1, _P256_P) % _P256_P
+    else:
+        lam = (y2 - y1) * pow(x2 - x1, -1, _P256_P) % _P256_P
+    x3 = (lam * lam - x1 - x2) % _P256_P
+    return x3, (lam * (x1 - x3) - y1) % _P256_P
+
+
+def _p256_mul(k: int, P):
+    R = None
+    while k:
+        if k & 1:
+            R = _p256_add(R, P)
+        P = _p256_add(P, P)
+        k >>= 1
+    return R
+
+
+def p256_public_point(raw: bytes):
+    """A 64-byte x||y public key (CryptoKit's rawRepresentation) as a curve point, or None."""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) != 64:
+        return None
+    P = (int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+    return P if _p256_on_curve(P) else None
+
+
+def _py_es256_verify(public: bytes, msg: bytes, sig: bytes) -> bool:
+    Q = p256_public_point(public)
+    if Q is None or len(sig) != 64:
+        return False
+    r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    if not (0 < r < _P256_N and 0 < s < _P256_N):
+        return False
+    e = int.from_bytes(hashlib.sha256(msg).digest(), "big")
+    w = pow(s, -1, _P256_N)
+    X = _p256_add(_p256_mul(e * w % _P256_N, _P256_G), _p256_mul(r * w % _P256_N, Q))
+    return X is not None and X[0] % _P256_N == r
+
+
+def es256_verify(public: bytes, msg: bytes, sig: bytes) -> bool:
+    """ECDSA P-256/SHA-256 over msg, with a 64-byte x||y key and a 64-byte r||s signature."""
+    if p256_public_point(public) is None or not isinstance(sig, (bytes, bytearray)) or len(sig) != 64:
+        return False
+    try:
+        from cryptography.hazmat.primitives import hashes  # type: ignore
+        from cryptography.hazmat.primitives.asymmetric import ec  # type: ignore
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature  # type: ignore
+    except Exception:  # pragma: no cover - depends on environment
+        return _py_es256_verify(public, msg, sig)
+    try:
+        key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b"\x04" + bytes(public))
+        der = encode_dss_signature(int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big"))
+        key.verify(der, msg, ec.ECDSA(hashes.SHA256()))
+        return True
+    except Exception:
+        return False
+
+
+def _approval_keys(registry: dict | None, agent_id) -> list:
+    """(kid, alg, raw) for each of the approver's well-formed approval keys."""
+    if not registry or not isinstance(agent_id, str):
+        return []
+    entry = registry.get("agents", {}).get(agent_id) or {}
+    out = []
+    for k in entry.get("keys", []) or []:
+        if not isinstance(k, dict):
+            continue
+        alg = k.get("alg", ALG)
+        try:
+            raw = unb64u(k.get("public_key", ""))
+        except Exception:
+            continue
+        if (alg == ALG and len(raw) == 32) or (alg == ALG_ES256 and p256_public_point(raw) is not None):
+            out.append((k.get("kid"), alg, raw))
+    return out
+
+
+def usable_approval_keys(registry: dict | None, agent_id) -> list:
+    """The kids of an approver's keys of either approval algorithm. More than one means an approval must
+    name its kid (the Touch ID key and the passphrase key are usually both registered)."""
+    return [kid for kid, _, _ in _approval_keys(registry, agent_id)]
+
+
+def verify_approval(registry: dict | None, approver, kid, msg: bytes, sig: bytes) -> bool:
+    """Verify an approval signature with the approver's registered key named by kid (or the only one).
+    The algorithm is the registered key's: an Ed25519 key never accepts an ES256 signature, or back."""
+    keys = _approval_keys(registry, approver)
+    if kid is None and len(keys) > 1:
+        return False
+    for k_kid, alg, raw in keys:
+        if kid is None or k_kid == kid:
+            return verify_bytes(raw, msg, sig) if alg == ALG else es256_verify(raw, msg, sig)
+    return False

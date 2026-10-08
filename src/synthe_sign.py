@@ -232,7 +232,9 @@ def approve_packet(packet: dict, key: dict, action: str, expires_at: str | None,
         appr["expires_at"] = expires_at
     if params is not None:
         appr["params"] = json.loads(json.dumps(params))  # a copy, never a shared reference
-    sig = sc.sign_bytes(key["_secret"], sc.approval_signing_input(appr, h))
+    msg = sc.approval_signing_input(appr, h)
+    # A Touch ID key (synthe_touchid.signing_key) signs in the Secure Enclave, after a finger on the sensor.
+    sig = key["_sign"](msg) if callable(key.get("_sign")) else sc.sign_bytes(key["_secret"], msg)
     appr.update(kid=key["kid"], sig=sc.b64u(sig))
     h.setdefault("authority", {}).setdefault("approvals", []).append(appr)
     packet.pop("signature", None)  # approvals changed: sender must (re)sign
@@ -306,9 +308,8 @@ def cmd_verify(a) -> int:
         if appr.get("sig") is None:
             report["approvals"].append({"action": appr.get("action"), "status": "unsigned"})
             continue
-        key = sc.find_key(registry, appr.get("approver"), appr.get("kid"))
-        good = key is not None and sc.verify_bytes(
-            key, sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
+        good = sc.verify_approval(registry, appr.get("approver"), appr.get("kid"),
+                                  sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
         report["approvals"].append({"action": appr.get("action"), "approver": appr.get("approver"),
                                     "status": "verified" if good else "INVALID"})
         ok &= good

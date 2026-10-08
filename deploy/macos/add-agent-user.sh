@@ -62,6 +62,11 @@ for name in init mcp task client; do
   chown root:wheel "$APP/venv/bin/synthe-$name"
   chmod 755 "$APP/venv/bin/synthe-$name"
 done
+# git runs remote helpers by name: with this on the agent's PATH, a plain `git push` to a synthe:: origin
+# becomes a proposal (docs/GIT_PUSH.md). Without it, setup's ~/.local/bin link pointed at nothing.
+printf '#!/bin/sh\nexec %s %s "$@"\n' "$BPY" "$APP/src/synthe_git_remote.py" > "$APP/venv/bin/git-remote-synthe"
+chown root:wheel "$APP/venv/bin/git-remote-synthe"
+chmod 755 "$APP/venv/bin/git-remote-synthe"
 
 # 4. publish the broker's public key (root-owned, world-readable) so anyone can verify its receipts
 "$BPY" - "$STATE/registry.json" "$(dirname "$WORKSPACE")/broker.pub.json" <<'PYEOF'
