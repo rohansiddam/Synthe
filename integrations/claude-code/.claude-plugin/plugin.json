@@ -2,5 +2,9 @@
   "name": "synthe",
   "version": "0.6.0",
   "description": "Propose git effects to the isolated Synthe broker; humans approve exact commits.",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Synthe",
+    "url": "https://synthe.live"
+  }
 }

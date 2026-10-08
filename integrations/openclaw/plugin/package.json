@@ -1,6 +1,6 @@
 {
   "name": "@synthelive/openclaw-synthe-barrier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Synthe commit barrier for OpenClaw: blocks direct pushes and shows what waits for your approval",
   "type": "module",
   "license": "Apache-2.0",
@@ -21,9 +21,11 @@
     }
   },
   "scripts": {
+    "build": "node -e \"require('child_process').execSync('esbuild index.ts --bundle --platform=node --format=esm --external:\\'openclaw*\\' --outfile=dist/index.js')\"",
     "test": "node --test policy.test.ts broker.test.ts"
   },
   "files": [
+    "dist",
     "index.ts",
     "policy.ts",
     "broker.ts",
