@@ -1,0 +1,53 @@
+{
+  "kind": "machine time only (no model, no human reading or typing)",
+  "total_seconds": 2.844,
+  "phases": [
+    {
+      "phase": "test repo (bare remote + agent clone)",
+      "seconds": 0.272
+    },
+    {
+      "phase": "synthe-init setup (sealed approver key, broker)",
+      "seconds": 0.207
+    },
+    {
+      "phase": "broker start",
+      "seconds": 0.009
+    },
+    {
+      "phase": "synthe-task (signed task)",
+      "seconds": 0.192
+    },
+    {
+      "phase": "agent: validate + claim (MCP)",
+      "seconds": 0.079
+    },
+    {
+      "phase": "agent: commit on its branch",
+      "seconds": 0.106
+    },
+    {
+      "phase": "agent: propose (bundle to broker, staged)",
+      "seconds": 0.721
+    },
+    {
+      "phase": "human: open the diff (staged_detail)",
+      "seconds": 0.151
+    },
+    {
+      "phase": "human: unlock key + sign + submit (push executes)",
+      "seconds": 0.596
+    },
+    {
+      "phase": "verify the receipt chain",
+      "seconds": 0.003
+    }
+  ],
+  "receipts": 3,
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "cpu": "arm",
+  "python": "3.14.4",
+  "openclaw": null,
+  "crypto_backend": "cryptography",
+  "when": "2026-10-06T21:24:31-0600"
+}

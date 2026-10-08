@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+formal/.tools/
+formal/*_TTrace_*
+formal/states/
+.synthe-broker/
+
+# a local dev venv: name it venv, not .venv, inside iCloud-synced folders (QUICKSTART_OPENCLAW.md)
+.venv/
+venv/

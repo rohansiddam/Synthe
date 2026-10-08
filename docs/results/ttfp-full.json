@@ -1,0 +1,61 @@
+{
+  "kind": "machine time only (no model, no human reading or typing)",
+  "total_seconds": 31.506,
+  "phases": [
+    {
+      "phase": "install (fresh venv + pip install)",
+      "seconds": 7.312
+    },
+    {
+      "phase": "test repo (bare remote + agent clone)",
+      "seconds": 0.26
+    },
+    {
+      "phase": "synthe-init setup (sealed approver key, broker)",
+      "seconds": 0.206
+    },
+    {
+      "phase": "OpenClaw wiring (MCP server, plugin, skill)",
+      "seconds": 21.36
+    },
+    {
+      "phase": "broker start",
+      "seconds": 0.002
+    },
+    {
+      "phase": "synthe-task (signed task)",
+      "seconds": 0.191
+    },
+    {
+      "phase": "agent: validate + claim (MCP)",
+      "seconds": 0.181
+    },
+    {
+      "phase": "agent: commit on its branch",
+      "seconds": 0.112
+    },
+    {
+      "phase": "agent: propose (bundle to broker, staged)",
+      "seconds": 0.683
+    },
+    {
+      "phase": "human: open the diff (staged_detail)",
+      "seconds": 0.133
+    },
+    {
+      "phase": "human: unlock key + sign + submit (push executes)",
+      "seconds": 0.552
+    },
+    {
+      "phase": "verify the receipt chain",
+      "seconds": 0.002
+    }
+  ],
+  "receipts": 3,
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "cpu": "arm",
+  "python": "3.14.4",
+  "openclaw": "OpenClaw 2026.9.8 (fc23bc8)",
+  "crypto_backend": "cryptography",
+  "when": "2026-10-06T21:25:13-0600"
+}

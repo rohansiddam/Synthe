@@ -1,0 +1,4 @@
+# Only src/ goes into the image (BuildKit reads <Dockerfile>.dockerignore).
+*
+!src/
+src/__pycache__

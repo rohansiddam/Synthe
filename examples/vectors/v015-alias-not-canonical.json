@@ -1,0 +1,169 @@
+{
+ "name": "alias-not-canonical",
+ "description": "From is alias.",
+ "entry": "validate",
+ "packet": {
+  "handoff": {
+   "schema_version": "0.1",
+   "id": "h-k-alias",
+   "trace_id": "t-k-alias",
+   "idempotency_key": "k-alias",
+   "on_failure": "reject",
+   "from": "old-planner",
+   "to": "builder",
+   "purpose": "add a flag and push it",
+   "inputs": {
+    "artifact_refs": [
+     {
+      "path": "task.md",
+      "sha256": "c91de34ef6c9d16303e37ac4983b23db8a92d46c8692fcc301ad4be4d133aba4"
+     }
+    ],
+    "state_revision": "rev-1"
+   },
+   "scope": {
+    "owned_paths": [
+     "src/**"
+    ],
+    "forbidden": []
+   },
+   "authority": {
+    "allowed_tools": [
+     "read_repo",
+     "edit_files",
+     "run_tests",
+     "git_push"
+    ],
+    "approval_required_for": [
+     "git_push"
+    ],
+    "budget": {
+     "tokens": 50000,
+     "usd": 5,
+     "minutes": 60
+    },
+    "approvals": []
+   },
+   "planned_actions": [
+    {
+     "name": "edit",
+     "tool": "edit_files"
+    },
+    {
+     "name": "push_branch",
+     "tool": "git_push",
+     "params": {
+      "remote": "origin",
+      "branch": "feature/x"
+     }
+    }
+   ],
+   "acceptance": {
+    "expires_at": "2026-11-04T21:19:37Z",
+    "output_schema": "code_change.v1",
+    "required_evidence": [
+     "test_output"
+    ],
+    "evidence": [
+     {
+      "kind": "test_output",
+      "ref": "task.md"
+     }
+    ]
+   }
+  }
+ },
+ "registry": {
+  "agents": {
+   "planner": {
+    "role": "sender",
+    "keys": [
+     {
+      "kid": "planner-1",
+      "alg": "Ed25519",
+      "public_key": "bOPqoRHeca9uPKT-1Ugh2MWaEU2Z9Xy-e6BWAuh1O7E"
+     }
+    ]
+   },
+   "builder": {
+    "role": "receiver",
+    "keys": [
+     {
+      "kid": "builder-1",
+      "alg": "Ed25519",
+      "public_key": "BquwTJ0ohzy18q3CM_3pfGIc6OslmK-DVGeZ9jjozwo"
+     }
+    ],
+    "policy": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "forbidden": [
+      "force_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "trusted_approvers": [
+      "rishab"
+     ],
+     "budget": {
+      "tokens": 200000,
+      "usd": 10,
+      "minutes": 120
+     },
+     "require_signatures": true,
+     "require_signed_approvals": true,
+     "require_planned_actions": true,
+     "defaults": {
+      "owned_paths": [
+       "src/**"
+      ],
+      "output_schema": "code_change.v1",
+      "budget": {
+       "tokens": 100000,
+       "usd": 5,
+       "minutes": 60
+      }
+     }
+    }
+   },
+   "rishab": {
+    "role": "approver",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "rishab-1",
+      "alg": "Ed25519",
+      "public_key": "DUNsWzTbdQaOkbi2BuE6cYBfyU8BhnHs7np9ghl-8cg"
+     }
+    ]
+   },
+   "mallory": {
+    "role": "untrusted",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "mallory-1",
+      "alg": "Ed25519",
+      "public_key": "I57ssyjtj6XqEGXZBCg2w2tJcXxF57Vd-x9O1ET8BHQ"
+     }
+    ]
+   },
+   "old-planner": {
+    "alias_of": "planner"
+   }
+  }
+ },
+ "expected": {
+  "decision": "REJECT",
+  "state": "invalid",
+  "codes": [
+   "alias_not_canonical"
+  ]
+ },
+ "ledger": {}
+}

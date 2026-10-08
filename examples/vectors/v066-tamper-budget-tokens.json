@@ -1,0 +1,184 @@
+{
+ "name": "tamper-budget-tokens",
+ "description": "Post-signing: budget.tokens 50000 -> 50001.",
+ "entry": "validate",
+ "packet": {
+  "handoff": {
+   "schema_version": "0.1",
+   "id": "h-k-tamper-4",
+   "trace_id": "t-k-tamper-4",
+   "idempotency_key": "k-tamper-4",
+   "on_failure": "reject",
+   "from": "planner",
+   "to": "builder",
+   "purpose": "add a flag and push it",
+   "inputs": {
+    "artifact_refs": [
+     {
+      "path": "task.md",
+      "sha256": "c91de34ef6c9d16303e37ac4983b23db8a92d46c8692fcc301ad4be4d133aba4"
+     }
+    ],
+    "state_revision": "rev-1"
+   },
+   "scope": {
+    "owned_paths": [
+     "src/**"
+    ],
+    "forbidden": []
+   },
+   "authority": {
+    "allowed_tools": [
+     "read_repo",
+     "edit_files",
+     "run_tests",
+     "git_push"
+    ],
+    "approval_required_for": [
+     "git_push"
+    ],
+    "budget": {
+     "tokens": 50001,
+     "usd": 5,
+     "minutes": 60
+    },
+    "approvals": [
+     {
+      "action": "push_branch",
+      "approver": "rishab",
+      "expires_at": "2026-10-12T21:45:04Z",
+      "params": {
+       "remote": "origin",
+       "branch": "feature/x"
+      },
+      "kid": "rishab-1",
+      "sig": "uAp9yPjnT513GAZAutOmIVowsx5DU8ZY10GiYsAKXDNzs_DIzbK098j3K5hwoIw1kBj3x5Qwy8xrx0M_hOA9DA"
+     }
+    ]
+   },
+   "planned_actions": [
+    {
+     "name": "edit",
+     "tool": "edit_files"
+    },
+    {
+     "name": "push_branch",
+     "tool": "git_push",
+     "params": {
+      "remote": "origin",
+      "branch": "feature/x"
+     }
+    }
+   ],
+   "acceptance": {
+    "expires_at": "2026-11-04T21:45:04Z",
+    "output_schema": "code_change.v1",
+    "required_evidence": [
+     "test_output"
+    ],
+    "evidence": [
+     {
+      "kind": "test_output",
+      "ref": "task.md"
+     }
+    ]
+   }
+  },
+  "signature": {
+   "signer": "planner",
+   "kid": "planner-1",
+   "alg": "Ed25519",
+   "sig": "WUI11kJ0qxEY_ywRtz2R3Ii8Lg09O-6K-CwjWdwMPRXVNa2F2z2gfxbmCQ2pGVIcmCHQF_RNHhJ95IcsxB_iCA"
+  }
+ },
+ "registry": {
+  "agents": {
+   "planner": {
+    "role": "sender",
+    "keys": [
+     {
+      "kid": "planner-1",
+      "alg": "Ed25519",
+      "public_key": "w2Xg_wFTcYc7iHDjpdnXkLsQ_Fm9oW5OlggcK_IcEio"
+     }
+    ]
+   },
+   "builder": {
+    "role": "receiver",
+    "keys": [
+     {
+      "kid": "builder-1",
+      "alg": "Ed25519",
+      "public_key": "AWV9Ui7DxnJZdVjKAAU_cgIhY1is4v5V7r5dOc-yp0Q"
+     }
+    ],
+    "policy": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "forbidden": [
+      "force_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "trusted_approvers": [
+      "rishab"
+     ],
+     "budget": {
+      "tokens": 200000,
+      "usd": 10,
+      "minutes": 120
+     },
+     "require_signatures": true,
+     "require_signed_approvals": true,
+     "require_planned_actions": true,
+     "defaults": {
+      "owned_paths": [
+       "src/**"
+      ],
+      "output_schema": "code_change.v1",
+      "budget": {
+       "tokens": 100000,
+       "usd": 5,
+       "minutes": 60
+      }
+     }
+    }
+   },
+   "rishab": {
+    "role": "approver",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "rishab-1",
+      "alg": "Ed25519",
+      "public_key": "ie2DuKl0rW7fIlcYgzVPXGoD5yJ0dr-KHPcONcGSesc"
+     }
+    ]
+   },
+   "mallory": {
+    "role": "untrusted",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "mallory-1",
+      "alg": "Ed25519",
+      "public_key": "53pkK8kqZ5GiU4BI-JqUSxdytu2sWjYA6PHuDO7xrZM"
+     }
+    ]
+   }
+  }
+ },
+ "expected": {
+  "decision": "REJECT",
+  "state": "invalid",
+  "codes": [
+   "signature_invalid"
+  ]
+ },
+ "ledger": {}
+}

@@ -1,0 +1,52 @@
+# Synthe commit broker as its own OS user (isolation mode "user").
+# Installed by deploy/linux/install.sh; see docs/ISOLATION.md.
+#
+# The broker holds the signing key, the GitHub token (token_file, 0600), the
+# registry, ledger and receipts under /var/lib/synthe (0700). Agents reach it
+# only through /run/synthe/broker.sock, and the broker names every client from
+# the kernel (SO_PEERCRED): clients running as `synthe` or root are refused.
+[Unit]
+Description=Synthe commit broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=synthe
+Group=synthe
+Environment=HOME=/var/lib/synthe PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/synthe/venv/bin/python /opt/synthe/src/synthe_commit.py serve --config /var/lib/synthe/broker.json --socket /run/synthe/broker.sock
+Restart=on-failure
+RestartSec=2
+
+# State: private to the broker. Socket dir: traversable, writable only by it.
+StateDirectory=synthe
+StateDirectoryMode=0700
+RuntimeDirectory=synthe
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# Hardening: the broker needs its state dir, the socket dir and the network.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

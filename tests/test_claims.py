@@ -1,7 +1,6 @@
-"""Claim binding, release and fenced effects: the fixes for two claim-ledger
-bugs (anyone holding a packet could complete someone else's claim; a slow
-receiver could act twice after release and redispatch). Each failing
-sequence is replayed here against the real checker."""
+"""Claim binding, release and fenced effects: the fixes for the two
+counterexamples TLC found in formal/SyntheClaim.tla. Each counterexample
+trace is replayed here against the real checker."""
 import datetime as dt
 import json
 import sys
@@ -41,7 +40,7 @@ def test_accept_returns_bound_claim(tmp_path):
 
 
 def test_trace_v03_forged_completion_is_refused(tmp_path):
-    """Receiver r2 claims; r1, which also saw the packet, tries to complete it."""
+    """TLC trace (BindCompletion=FALSE): Claim(r2) -> ForgeComplete(r1)."""
     ledger = tmp_path / "ledger.json"
     packet, _, verdict = claim(ledger)
     h = packet["handoff"]
@@ -54,9 +53,9 @@ def test_trace_v03_forged_completion_is_refused(tmp_path):
 
 
 def test_trace_ttl_reclaim_zombie_cannot_act_twice(tmp_path):
-    """Claim(r1) -> TTL expires -> release -> r1 acts late -> Claim(r2) ->
-    r2 acts: without fencing that is two effects. With fenced() the stale
-    holder is refused, so the effect happens exactly once."""
+    """TLC trace (GatedEffects=FALSE): Claim(r1) -> Expire -> Reconcile ->
+    Effect(r1) -> Claim(r2) -> Effect(r2) gave effects = 2. With fenced()
+    the stale holder is refused, so the effect happens exactly once."""
     ledger = tmp_path / "ledger.json"
     effects = []
     packet, reg, first = claim(ledger)                        # Claim(r1)
@@ -108,6 +107,20 @@ def test_release_cli_and_legacy_entries(tmp_path):
     ledger.write_text(json.dumps({key: {"state": "RESERVED", "handoff_id": packet["handoff"]["id"],
                                         "reserved_at": dt.datetime.now(dt.timezone.utc).isoformat()}}))
     assert hc.complete(packet, ledger)["decision"] == "COMPLETED"
+
+
+def test_a2a_status_never_carries_the_claim_token(tmp_path):
+    """The A2A TaskStatus goes back to the requester (the sender); the token
+    must stay with the receiver or the sender could close its claim."""
+    import synthe_a2a as a2a
+    ledger = tmp_path / "ledger.json"
+    packet = json.loads((V3 / "packets" / "valid-signed.json").read_text())
+    reg = json.loads((V3 / "registry.json").read_text())
+    status, claim = a2a.check_message(a2a.to_message(packet), return_claim=True, registry=reg,
+                                      ledger_path=ledger, workspace=V3 / "workspace")
+    assert status["state"] == "TASK_STATE_SUBMITTED"
+    assert claim["token"] and claim["token"] not in json.dumps(status)
+    assert hc.complete(packet, ledger, claim_token=claim["token"])["decision"] == "COMPLETED"
 
 
 def test_action_log_never_prints_the_claim_token(tmp_path):
