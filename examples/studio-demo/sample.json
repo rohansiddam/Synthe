@@ -1,0 +1,11 @@
+{
+  "hello":{"broker_id":"sample-broker","version":"0.7-preview","protocol":1,"isolation":{"mode":"sample","verified":false,"note":"simulated"}},
+  "staged":{"staged":[
+    {"idempotency_key":"demo:filters","action":"push_branch","state":"STAGED","waiting_for":["approval"],"params":{"remote":"origin","branch":"agent/filter-table","commit":"7c12abcdef1234567890abcdef1234567890abcd"},"staged_at":"2026-10-08T06:30:00Z"},
+    {"idempotency_key":"demo:docs","action":"push_branch","state":"STAGED","waiting_for":["branch_changed"],"params":{"remote":"origin","branch":"agent/update-docs","commit":"8d34abcdef1234567890abcdef1234567890abcd"},"staged_at":"2026-10-08T06:25:00Z"}
+  ]},
+  "receipts":{"ok":true,"receipts":[
+    {"seq":21,"decision":"executed","proposal_id":"demo:previous/push_branch","effect":{"branch":"agent/previous","commit":"5a12abcdef1234567890abcdef1234567890abcd"}},
+    {"seq":22,"decision":"approval_accepted","proposal_id":"demo:filters/push_branch","effect":{"branch":"agent/filter-table","commit":"7c12abcdef1234567890abcdef1234567890abcd"}}
+  ]}
+}
