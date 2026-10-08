@@ -1,0 +1,21 @@
+{
+  "name": "synthe",
+  "owner": {
+    "name": "Synthe",
+    "url": "https://synthe.live"
+  },
+  "metadata": {
+    "description": "Synthe: hardware-backed commit barrier and approval engine for autonomous AI agents."
+  },
+  "plugins": [
+    {
+      "name": "synthe",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/rohansiddam/Synthe.git",
+        "path": "integrations/claude-code"
+      },
+      "description": "Propose git effects to the isolated Synthe broker; humans approve exact commits."
+    }
+  ]
+}
