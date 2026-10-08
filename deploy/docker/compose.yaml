@@ -1,0 +1,33 @@
+# Synthe commit broker, containerised (isolation mode "container").
+#
+#   export SYNTHE_BROKER_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+#   docker compose -f deploy/docker/compose.yaml up -d
+#
+# Agents reach it only on 127.0.0.1:
+#   SYNTHE_BROKER=tcp://127.0.0.1:8791 SYNTHE_BROKER_TOKEN=... python3 src/synthe_client.py hello
+#
+# Limit: a container is a wall only against users who cannot run docker. Anyone
+# in the docker group (or root) can enter it and read the key. Prefer a
+# separate OS user (deploy/linux, deploy/macos) when agents share the host.
+services:
+  broker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: synthe-broker:0.6
+    environment:
+      SYNTHE_BROKER_TOKEN: ${SYNTHE_BROKER_TOKEN:?set SYNTHE_BROKER_TOKEN; never commit it}
+    ports:
+      - "127.0.0.1:8791:8791"   # loopback only
+    volumes:
+      - synthe-data:/synthe     # broker.json, key, registry, ledger, receipts, token file
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  synthe-data:

@@ -1,5 +1,5 @@
 """v0.3 trust layer: signatures, receiver policy (attenuation), evidence
-pinning, fail-closed parsing."""
+pinning, fail-closed parsing, MCP server, A2A adapter."""
 import copy
 import datetime as dt
 import hashlib
@@ -11,7 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 import handoff_check as hc      # noqa: E402
+import synthe_a2a as a2a        # noqa: E402
 import synthe_crypto as sc      # noqa: E402
+import synthe_mcp as mcp        # noqa: E402
 
 V3 = ROOT / "examples" / "v03"
 AT = dt.datetime(2026, 10, 1, 6, 0, tzinfo=dt.timezone.utc)
@@ -200,3 +202,41 @@ def test_cli_keygen_approve_sign_verify(tmp_path):
     res = subprocess.run([py, src / "handoff_check.py", tmp_path / "p.json", "--registry", tmp_path / "reg.json",
                           "--workspace", V3 / "workspace", "--dry-run"], capture_output=True, text=True)
     assert json.loads(res.stdout)["decision"] == "ACCEPT", res.stdout
+
+
+# ---- MCP + A2A ---------------------------------------------------------------
+def test_mcp_server_validate_claim_and_complete(tmp_path):
+    srv = mcp.SyntheServer(str(V3 / "registry.json"), tmp_path / "ledger.json", V3 / "workspace")
+    init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "t", "version": "0"}}})
+    assert init["result"]["protocolVersion"] == "2025-06-18"
+    assert srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    names = [t["name"] for t in srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
+    assert "synthe_validate_handoff" in names
+
+    def call(name, args, i):
+        return srv.handle({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                           "params": {"name": name, "arguments": args}})["result"]["structuredContent"]
+    p = pkt("valid-signed")
+    accepted = call("synthe_validate_handoff", {"packet": p}, 3)
+    assert accepted["decision"] == "ACCEPT" and accepted["claim"]["epoch"] == 1
+    assert call("synthe_validate_handoff", {"packet": p}, 4)["state"] == "duplicate"
+    # holding the packet is not enough on a shared endpoint (the sender has it too)
+    no_token = call("synthe_complete_handoff", {"packet": p}, 5)
+    assert no_token["reasons"][0]["code"] == "claim_token_required"
+    wrong = call("synthe_complete_handoff", {"packet": p, "claim_token": "guess"}, 5)
+    assert wrong["reasons"][0]["code"] == "claim_token_invalid"
+    token = accepted["claim"]["token"]
+    assert call("synthe_complete_handoff", {"packet": p, "claim_token": token}, 5)["decision"] == "COMPLETED"
+    assert srv.handle({"jsonrpc": "2.0", "id": 6, "method": "nope"})["error"]["code"] == -32601
+
+
+def test_a2a_round_trip_and_state_mapping():
+    kw = dict(registry=reg(), ledger_path=None, workspace=V3 / "workspace", dry_run=True)
+    assert a2a.check_message(a2a.to_message(pkt("valid-signed")), **kw)["state"] == "TASK_STATE_SUBMITTED"
+    assert a2a.check_message(a2a.to_message(pkt("attack-forged-approval")), **kw)["state"] == "TASK_STATE_INPUT_REQUIRED"
+    assert a2a.check_message(a2a.to_message(pkt("attack-spoofed-sender")), **kw)["state"] == "TASK_STATE_REJECTED"
+    m = a2a.to_message(pkt("valid-signed"))
+    m["messageId"] = "something-else"
+    assert a2a.check_message(m, **kw)["state"] == "TASK_STATE_REJECTED"

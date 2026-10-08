@@ -1,0 +1,3 @@
+{"id": "synthe-test-echo-shell", "name": "Synthe test: echo shell", "description": "Test-only tool that echoes a command and runs nothing",
+ "categories": ["other"], "contracts": {"tools": ["shell"]}, "activation": {"onStartup": true},
+ "configSchema": {"type": "object", "additionalProperties": false}}

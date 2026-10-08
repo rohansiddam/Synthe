@@ -1,125 +1,53 @@
 # Synthe
 
-Synthe checks every handoff between AI agents before the receiving agent acts on it.
+**The commit barrier for AI agents.** Agents propose. You approve. Synthe commits, exactly once, and
+writes a signed receipt anyone can verify.
 
-Most agent-to-agent handoffs today are blobs of text that the receiving agent takes on trust. That is how the same work gets done twice, stale artifacts get acted on, and actions nobody approved slip through. Synthe puts a gate in the middle: every handoff arrives as a typed packet, gets validated against a registry and the actual artifacts it points to, and gets an ACCEPT or a REJECT with a reason. Every accepted handoff is recorded, so the same one cannot be claimed twice.
+An AI agent with a GitHub token can push whatever it decides to. With Synthe, the agent holds no
+credential at all. It commits on its own branch and *proposes* the push. The Synthe broker runs as its
+own user and holds the only GitHub token. It shows you its own copy of the diff, waits for your
+passphrase-signed approval, and pushes exactly that commit. It records every decision, allowed or
+refused, in a hash-chained receipt log.
 
-## v0.5
+## What's proven
 
-Additive on top of v0.3 (same wire format, `schema_version: "0.1"`):
+Verified on 2026-10-07 on macOS, against real GitHub. The evidence is in
+[`docs/OPENCLAW_RESULTS.md`](docs/OPENCLAW_RESULTS.md).
 
-- **Approvals that pin the effect's target** (v0.4). A planned action may carry `params` (for
-  example a branch or a recipient). An approval can sign them too, so a sender cannot retarget an
-  approved action: `approval_params_mismatch`. Approvals without `params` work exactly as in v0.3.
-- **Detached and deferred approvals.** An approval can arrive after the packet, signed the same
-  way and checked the same way (`synthe_sign.py approve --detached`), so work can start before a
-  human answers and still never commit without one.
-- **Wait-for dependencies** (`depends_on`): a handoff's effects wait until its upstream handoffs
-  are `COMPLETED`; wait-for cycles are refused at claim time.
-- **Exclusive paths:** a receiver can refuse two live claims whose `owned_paths` overlap
-  (`claim_conflict`).
-- **Exactly-once per effect:** `fenced_effect()` fences each named effect of a multi-effect
-  handoff, and receipts for effects have their own signature domain.
+- **ENFORCED:** the broker runs as `_synthe` and the agent in its own account with no credentials.
+  All 8 doctor checks pass.
+- **A real OpenClaw agent** (Claude Opus) followed the rules on its own: it proposed, then stopped for
+  approval.
+- **A live red team of 33 attacks** from the agent's account was refused or contained
+  ([`docs/REDTEAM.md`](docs/REDTEAM.md)):
+  - forged, tampered and replayed tasks;
+  - pushes outside the allowed files or branches, or to `main`;
+  - history rewrites;
+  - self-approvals;
+  - swapping the commit while you read the diff.
 
-Details and every new reason code: [`SPEC.md`](SPEC.md); threats: [`THREAT_MODEL.md`](THREAT_MODEL.md).
+  Every refusal left a signed receipt, and the chain verifies with the broker's published key.
 
-## v0.3
+## Get started (macOS, OpenClaw)
 
-Receiver policy (authority can only narrow), Ed25519-signed packets and
-approvals, evidence pinning, fail-closed parsing, and a hardened claim ledger
-(claim tokens, `--release`, `fenced()`).
+[`QUICKSTART_OPENCLAW.md`](QUICKSTART_OPENCLAW.md). Your coding agent can do the preparation
+(`skills/synthe-setup/SKILL.md`). You run one command, which asks for a passphrase, your GitHub token
+(hidden) and your Mac password.
 
-- **The contract:** [`SPEC.md`](SPEC.md): fields, policy, signatures, validation order, every reason code
-- **What it does and doesn't protect:** [`THREAT_MODEL.md`](THREAT_MODEL.md)
-- **Try to break it:** `examples/v03/` has one valid signed packet and 8 attacks
-  (tampered after signing, spoofed sender, self-granted authority, forged approval,
-  replayed approval, exceeding receiver policy, paraphrased "verbatim" evidence,
-  undeclared actions). The keys in `examples/v03/test-keys/` are public test keys.
+## What's here
 
-```bash
-for f in examples/v03/packets/*.json; do
-  echo "== $(basename $f)"
-  python3 src/handoff_check.py "$f" --registry examples/v03/registry.json \
-    --workspace examples/v03/workspace --dry-run | head -8
-done
-```
+| Part | Where | License |
+|---|---|---|
+| The handoff contract: spec, schema, conformance vectors | `SPEC.md`, `schema/`, `examples/` | Apache-2.0 |
+| Checker, signing, client, MCP server, setup and approval tools | `src/` (except the broker files) | Apache-2.0 |
+| The OpenClaw plugin and skill; the setup skill | `integrations/openclaw/`, `skills/` | Apache-2.0 |
+| The broker and its installers | `src/synthe_commit.py`, `synthe_broker.py`, `synthe_plan.py`, `deploy/` | FSL-1.1-ALv2 |
 
-## Layout
+See [`LICENSING.md`](LICENSING.md). "Synthe" and the logo are trademarks of Synthe.
 
-- `SPEC.md`: the contract (v0.5)
-- `THREAT_MODEL.md`: what the gate stops and what it doesn't
-- `schema/handoff.schema.json`: JSON Schema for the packet
-- `src/handoff_check.py`: the checker (stdlib only; CLI + `check()` used by every entry point)
-- `src/synthe_crypto.py`, `src/synthe_sign.py`: Ed25519 signing and the keygen/approve/sign/verify CLI
-- `examples/`: v0.1 packets; `examples/v03/`: signed packet + 8 attack packets (test-only keys)
-- `github-action/`: the gate as a GitHub Action
-- `tests/`: 57 tests
+## What Synthe doesn't claim
 
-## Quickstart
-
-```bash
-python3 src/handoff_check.py examples/valid.json \
-  --registry examples/registry.json --workspace . --ledger ledger.json
-# ACCEPT, recorded in ledger.json (running it again -> REJECT duplicate)
-
-python3 src/handoff_check.py examples/bad-paraphrase-evidence.json \
-  --registry examples/registry.json --workspace . --dry-run
-# REJECT invalid: evidence_not_verbatim
-```
-
-Exit code 0 = ACCEPT, 2 = REJECT with a failure state and reason codes.
-
-## Ledger semantics (v0.2)
-
-The idempotency ledger records a **claim**, not just a sighting:
-
-- **ACCEPT** (non-dry-run) atomically records the packet's idempotency key
-  as `RESERVED` with the claiming handoff id and timestamp. The write runs
-  under a file lock with a temp-file rename, so two concurrent
-  presentations of the same key cannot both pass.
-- The ACCEPT returns `claim: {epoch, token}`. Completion is bound to that exact
-  packet (and token, when given). For non-idempotent effects, use
-  `fenced()` so a released claim's old holder can't act (see `SPEC.md` §8).
-- Once the receiver has actually performed the effect, it completes the
-  claim (terminal state, safe to re-run):
-
-  ```bash
-  python3 src/handoff_check.py examples/valid.json \
-    --ledger ledger.json --complete
-  ```
-
-- Re-presenting a `COMPLETED` key -> REJECT `duplicate` ("already completed
-  by handoff X").
-- Re-presenting a `RESERVED` key younger than `--reserve-ttl-hours`
-  (default 24) -> REJECT `duplicate` ("claimed by handoff X; reconcile
-  before redispatch").
-- Re-presenting a `RESERVED` key older than the TTL -> REJECT `unknown`:
-  the receiver may have crashed before or after the effect, so reconcile
-  against the receiver's effect receipt before redispatching.
-
-Ledger entries written by v0.1 (no `state` field) count as `COMPLETED`.
-The ledger is still just a local JSON file; on GitHub-hosted runners the
-bundled Action persists it across runs via `actions/cache` (see
-`github-action/README.md`), because runner workspaces are ephemeral.
-
-## What v0.1 checks
-
-Required fields (incl. nested), canonical agent identity (aliases must
-resolve), duplicate idempotency keys (ledger), handoff expiry, planned actions
-against allowed tools / forbidden actions / approvals / budgets, input artifact
-existence + SHA-256 when a `--workspace` root is given, required evidence
-present, and verbatim fidelity for code/legal-text evidence.
-
-## What v0.1 deliberately does not do
-
-- No semantic judgment: it can't tell whether the *content* of a deliverable is
-  right. It verifies the envelope and the evidence trail, humans keep verdicts.
-- Artifact checks only run against a local workspace root (no URL fetching).
-- The ledger is a local JSON file, not a hosted service.
-
-## Failure states
-
-`invalid`, `incomplete`, `stale`, `conflicting`, `blocked`, `retryable`
-(reserved; transient-retry classification lands with a runner), `duplicate`,
-`unknown` (v0.2: a claim was reserved but never completed past its TTL; the
-effect's outcome is unknown until reconciled).
+- **The OpenClaw plugin is a seatbelt.** The wall is that the agent holds no credential.
+- **Synthe mediates git effects.** It doesn't stop prompt injection, and it doesn't judge whether
+  approved code is correct.
+- **What each part does and doesn't protect** is in [`THREAT_MODEL.md`](THREAT_MODEL.md).

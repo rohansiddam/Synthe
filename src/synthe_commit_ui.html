@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthe Commit</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1c1c1a; --muted: #6b6b66; --line: #e3e2dc;
+  --ok: #1f7a4d; --ok-bg: #e5f3ea; --bad: #b3261e; --bad-bg: #fbe9e7;
+  --warn: #8a5a00; --warn-bg: #fdf1d8; --accent: #2b4acb; --code: #f0efe9;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413; --panel: #1d1d1b; --ink: #ecebe6; --muted: #9a9993; --line: #2e2e2b;
+    --ok: #5fd197; --ok-bg: #173325; --bad: #ff8a80; --bad-bg: #3a1916;
+    --warn: #f2c063; --warn-bg: #3a2c10; --accent: #8fa4ff; --code: #262624;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 28px 16px 64px; }
+header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; }
+h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
+.tag { color: var(--muted); margin: 2px 0 0; }
+.chain { border-radius: 10px; padding: 10px 14px; font-weight: 600; font-size: 14px; }
+.chain.ok { background: var(--ok-bg); color: var(--ok); }
+.chain.bad { background: var(--bad-bg); color: var(--bad); }
+.chain small { display: block; font-weight: 400; font-family: ui-monospace, Menlo, monospace; font-size: 12px; opacity: .85; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 22px 0; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.stat b { display: block; font-size: 26px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+h2 { font-size: 16px; margin: 30px 0 10px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 999px;
+  padding: 4px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line);
+  border-radius: 12px; padding: 14px 16px; margin: 10px 0; }
+.card.executed { border-left-color: var(--ok); }
+.card.denied { border-left-color: var(--bad); }
+.card.errored, .card.unconfirmed { border-left-color: var(--warn); }
+.top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pill { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  border-radius: 6px; padding: 2px 8px; }
+.pill.executed { background: var(--ok-bg); color: var(--ok); }
+.pill.denied { background: var(--bad-bg); color: var(--bad); }
+.pill.errored, .pill.unconfirmed { background: var(--warn-bg); color: var(--warn); }
+.seq, .time { color: var(--muted); font-size: 13px; }
+.sig { margin-left: auto; font-size: 12px; }
+.sig.ok { color: var(--ok); } .sig.bad { color: var(--bad); font-weight: 700; }
+.title { font-weight: 600; margin: 6px 0 2px; overflow-wrap: anywhere; }
+.meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+code, .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+code { background: var(--code); border-radius: 4px; padding: 1px 5px; }
+.reason { margin-top: 8px; font-size: 13.5px; }
+.reason code { color: var(--bad); }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+pre { background: var(--code); border-radius: 8px; padding: 10px; overflow: auto; font-size: 12px; max-height: 360px; }
+ul.paths { margin: 6px 0 0; padding-left: 18px; columns: 2; font-size: 12.5px; }
+@media (max-width: 640px) { ul.paths { columns: 1; } }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; overflow: hidden; font-size: 13.5px; }
+.tablewrap { overflow-x: auto; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12.5px; }
+tr:last-child td { border-bottom: 0; }
+.empty { color: var(--muted); padding: 18px; text-align: center; background: var(--panel);
+  border: 1px dashed var(--line); border-radius: 12px; }
+.err { background: var(--bad-bg); color: var(--bad); border-radius: 10px; padding: 10px 14px; margin-top: 14px; }
+footer { margin-top: 34px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Synthe Commit</h1>
+      <p class="tag">Agents propose. Synthe commits. Anyone can verify.</p>
+    </div>
+    <div id="chain" class="chain">Loading…</div>
+  </header>
+  <div id="error"></div>
+  <section class="stats" id="stats"></section>
+
+  <div class="bar">
+    <h2>Receipts</h2>
+    <div class="chips" role="group" aria-label="Filter receipts">
+      <button class="chip" data-f="all" aria-pressed="true">All</button>
+      <button class="chip" data-f="executed" aria-pressed="false">Executed</button>
+      <button class="chip" data-f="denied" aria-pressed="false">Denied</button>
+      <button class="chip" data-f="other" aria-pressed="false">Errored / unconfirmed</button>
+    </div>
+  </div>
+  <div id="receipts"></div>
+
+  <h2>Claims</h2>
+  <div id="claims"></div>
+
+  <footer id="footer"></footer>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const short = (s, n = 10) => s ? String(s).slice(0, n) : "—";
+let filter = "all";
+try { filter = localStorage.getItem("synthe-commit-filter") || "all"; } catch (e) {}
+const open = new Set();
+
+function setFilter(f) {
+  filter = f;
+  try { localStorage.setItem("synthe-commit-filter", f); } catch (e) {}
+  document.querySelectorAll(".chip").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.f === f)));
+  render(window.__state);
+}
+document.querySelectorAll(".chip").forEach((b) => b.addEventListener("click", () => setFilter(b.dataset.f)));
+
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? esc(iso) : d.toLocaleString();
+}
+
+function card(r) {
+  const e = r.effect || {}, h = r.handoff || {}, dec = r.decision || "unknown";
+  const target = e.branch ? `${esc(e.remote)}:${esc(e.branch)}` : "";
+  const title = `${esc(e.type || e.action || "effect")} ${target ? "→ " + target : ""} ${e.commit ? "@ <code>" + short(e.commit, 12) + "</code>" : ""}`;
+  const approvals = (r.approvals || []).map((a) => `${esc(a.approver)} <span class="mono">(${esc(a.kid)})</span>`).join(", ");
+  const reasons = (r.reasons || []).map((x) => `<div class="reason"><code>${esc(x.code)}</code> ${esc(x.message)}</div>`).join("");
+  const paths = (r.observed && r.observed.paths) || [];
+  const id = `r${r.seq}`;
+  return `<article class="card ${esc(dec)}">
+    <div class="top"><span class="pill ${esc(dec)}">${esc(dec)}</span>
+      <span class="seq">#${esc(r.seq)}</span><span class="time">${when(r.time)}</span>
+      <span class="sig ${r.verified ? "ok" : "bad"}">${r.verified ? "✓ signature + chain" : "✗ NOT VERIFIED"}</span></div>
+    <div class="title">${title}</div>
+    <div class="meta">handoff <code>${esc(h.id)}</code> · ${esc(h.from)} → ${esc(h.to)}${r.claim ? " · epoch " + esc(r.claim.epoch) : ""}${e.before !== undefined ? " · before <code>" + short(e.before, 10) + "</code> after <code>" + short(e.after, 10) + "</code>" : ""}</div>
+    ${approvals ? `<div class="meta">approved by ${approvals}</div>` : ""}
+    ${r.isolation ? `<div class="meta">via ${esc(r.via || "?")} · isolation <b>${esc(r.isolation.mode)}</b>${r.isolation.verified ? " (verified: broker uid " + esc(r.isolation.broker_uid) + ", agent uid " + esc(r.isolation.peer_uid) + ")" : r.isolation.mode === "container" ? " (declared)" : " (dev: not isolated)"}${r.commits_from ? " · commits from " + esc(String(r.commits_from).slice(0, 23)) + (String(r.commits_from).length > 23 ? "…" : "") : ""}</div>` : ""}
+    ${r.plan ? `<div class="meta">plan: ${(r.plan.planned_actions || []).map((a) => `${esc(a.name)} <b>${esc(a.status)}</b>`).join(" · ")}${(r.plan.remaining || []).length ? " · remaining: " + r.plan.remaining.map(esc).join(", ") : " · nothing left"}</div>` : ""}
+    ${reasons}
+    ${paths.length ? `<details data-id="${id}p" ${open.has(id + "p") ? "open" : ""}><summary>${paths.length} path(s) in ${esc(r.observed.commits)} commit(s)</summary><ul class="paths">${paths.map((p) => `<li class="mono">${esc(p)}</li>`).join("")}</ul></details>` : ""}
+    <details data-id="${id}" ${open.has(id) ? "open" : ""}><summary>Raw receipt</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
+  </article>`;
+}
+
+function render(s) {
+  if (!s) return;
+  if (s.error) { $("#error").innerHTML = `<div class="err">${esc(s.error)}</div>`; return; }
+  $("#error").innerHTML = "";
+  const c = s.chain;
+  const chainEl = $("#chain");
+  chainEl.className = "chain " + (c.ok ? "ok" : "bad");
+  chainEl.innerHTML = c.ok
+    ? `✓ Chain verified · ${c.count} receipt${c.count === 1 ? "" : "s"}<small>head ${short(c.head, 16)}</small>`
+    : `✗ Chain broken · ${c.errors.length} problem(s)<small>${esc(c.errors[0] && c.errors[0].error)}</small>`;
+  const rs = s.receipts || [];
+  const n = (d) => rs.filter((r) => r.decision === d).length;
+  const live = (s.claims || []).filter((x) => x.state === "RESERVED").length;
+  $("#stats").innerHTML = [
+    [n("executed"), "executed"], [n("denied"), "denied"],
+    [n("errored") + n("unconfirmed"), "errored / unconfirmed"], [live, "open claims"],
+  ].map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+  const shown = rs.filter((r) => filter === "all" || r.decision === filter ||
+    (filter === "other" && (r.decision === "errored" || r.decision === "unconfirmed")));
+  $("#receipts").innerHTML = shown.length ? shown.map(card).join("")
+    : `<div class="empty">No receipts${filter === "all" ? " yet. Propose an effect and it appears here." : " match this filter."}</div>`;
+  const cl = s.claims || [];
+  $("#claims").innerHTML = cl.length ? `<div class="tablewrap"><table><thead><tr><th>Idempotency key</th><th>State</th><th>Handoff</th><th>Epoch</th><th>Effects</th></tr></thead><tbody>${
+    cl.map((x) => `<tr><td class="mono">${esc(x.idempotency_key)}</td><td>${esc(x.state)}</td><td>${esc(x.handoff_id)}<div class="meta">${esc(x.from)} → ${esc(x.to)}</div></td><td>${esc(x.epoch)}</td><td>${
+      Object.entries(x.effects || {}).map(([a, v]) => `${esc(a)}: <b>${esc(v.state)}</b>${v.receipt_seq ? " (#" + esc(v.receipt_seq) + ")" : ""}`).join("<br>") || "—"}</td></tr>`).join("")
+  }</tbody></table></div>` : `<div class="empty">No claims in the ledger yet.</div>`;
+  const remotes = Object.entries((s.config && s.config.remotes) || {}).map(([k, v]) => `${esc(k)} = ${esc(v.url)} [${(v.branches || []).map(esc).join(", ")}]`).join(" · ");
+  $("#footer").innerHTML = `Broker <code>${esc(s.config.broker_id)}</code> v${esc(s.version)} · remotes: ${remotes || "none"}<br>Read-only. Verify independently: <code>python3 src/synthe_commit.py receipts verify --config broker.json</code>`;
+}
+
+document.addEventListener("toggle", (ev) => {
+  const id = ev.target.dataset && ev.target.dataset.id;
+  if (id) ev.target.open ? open.add(id) : open.delete(id);
+}, true);
+
+async function tick() {
+  try {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    window.__state = await res.json();
+    render(window.__state);
+  } catch (e) {
+    $("#error").innerHTML = `<div class="err">Console lost contact with the broker (${esc(e.message)}). Retrying…</div>`;
+  }
+}
+setFilter(filter);
+tick();
+setInterval(tick, 4000);
+</script>
+</body>
+</html>

@@ -1,0 +1,200 @@
+{
+ "name": "expiry-dependency-unknown",
+ "description": "depends_on names a key never claimed in this ledger.",
+ "entry": "complete",
+ "packet": {
+  "packet": {
+   "handoff": {
+    "schema_version": "0.1",
+    "id": "h-k-exp-3",
+    "trace_id": "t-k-exp-3",
+    "idempotency_key": "k-exp-3",
+    "on_failure": "reject",
+    "from": "planner",
+    "to": "builder",
+    "purpose": "add a flag and push it",
+    "inputs": {
+     "artifact_refs": [
+      {
+       "path": "task.md",
+       "sha256": "c91de34ef6c9d16303e37ac4983b23db8a92d46c8692fcc301ad4be4d133aba4"
+      }
+     ],
+     "state_revision": "rev-1"
+    },
+    "scope": {
+     "owned_paths": [
+      "src/**"
+     ],
+     "forbidden": []
+    },
+    "authority": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "budget": {
+      "tokens": 50000,
+      "usd": 5,
+      "minutes": 60
+     },
+     "approvals": [
+      {
+       "action": "push_branch",
+       "approver": "rishab",
+       "expires_at": "2026-10-12T21:51:34Z",
+       "params": {
+        "remote": "origin",
+        "branch": "feature/x"
+       },
+       "kid": "rishab-1",
+       "sig": "8weNLp5jC4WJg0Pa5vtBqHxC0D7UMa116B5QXGoqJNyxDt0IpD1RS8aubUDcMUMwv_UnNQzzChW-lI9IPsZrBw"
+      }
+     ]
+    },
+    "planned_actions": [
+     {
+      "name": "edit",
+      "tool": "edit_files"
+     },
+     {
+      "name": "push_branch",
+      "tool": "git_push",
+      "params": {
+       "remote": "origin",
+       "branch": "feature/x"
+      }
+     }
+    ],
+    "acceptance": {
+     "expires_at": "2026-11-04T21:51:34Z",
+     "output_schema": "code_change.v1",
+     "required_evidence": [
+      "test_output"
+     ],
+     "evidence": [
+      {
+       "kind": "test_output",
+       "ref": "task.md"
+      }
+     ]
+    },
+    "depends_on": [
+     "k-never-claimed"
+    ]
+   },
+   "signature": {
+    "signer": "planner",
+    "kid": "planner-1",
+    "alg": "Ed25519",
+    "sig": "OSBLvx7P1Utsvvvvy67vT46s8lE0MsKRAoXedrpgZcf391XdhdZQtmC9JQZaF4zY60EFj9tkdNiDNKN_KaUcDA"
+   }
+  },
+  "claim_token": null
+ },
+ "registry": {
+  "agents": {
+   "planner": {
+    "role": "sender",
+    "keys": [
+     {
+      "kid": "planner-1",
+      "alg": "Ed25519",
+      "public_key": "TcRyOOZANtqurQB-wcCXUG5mbksU7Rx8XzvDDxNRPHo"
+     }
+    ]
+   },
+   "builder": {
+    "role": "receiver",
+    "keys": [
+     {
+      "kid": "builder-1",
+      "alg": "Ed25519",
+      "public_key": "ScnuxNTNTj8O_GJTT3GfYApZEfmXaQSvNTm6rLR23u8"
+     }
+    ],
+    "policy": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "forbidden": [
+      "force_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "trusted_approvers": [
+      "rishab"
+     ],
+     "budget": {
+      "tokens": 200000,
+      "usd": 10,
+      "minutes": 120
+     },
+     "require_signatures": true,
+     "require_signed_approvals": true,
+     "require_planned_actions": true,
+     "defaults": {
+      "owned_paths": [
+       "src/**"
+      ],
+      "output_schema": "code_change.v1",
+      "budget": {
+       "tokens": 100000,
+       "usd": 5,
+       "minutes": 60
+      }
+     }
+    }
+   },
+   "rishab": {
+    "role": "approver",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "rishab-1",
+      "alg": "Ed25519",
+      "public_key": "NcVVPw6Zy4Fc70FVXfcZFbfIX1NFnycf-CWw0aA4TCA"
+     }
+    ]
+   },
+   "mallory": {
+    "role": "untrusted",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "mallory-1",
+      "alg": "Ed25519",
+      "public_key": "gDYu43kkEhwyfUX7tkAorJPHa3OaApnqSsokcbnrKS8"
+     }
+    ]
+   }
+  }
+ },
+ "expected": {
+  "decision": "REJECT",
+  "state": "blocked",
+  "codes": [
+   "dependency_unknown"
+  ]
+ },
+ "ledger": {
+  "k-exp-3": {
+   "state": "RESERVED",
+   "handoff_id": "h-k-exp-3",
+   "packet_sha256": "c4bde4acae2a202b08ef0e4dc7c882643683756cb3f87a9335da27262b76b73f",
+   "to": "builder",
+   "depends_on": [
+    "k-never-claimed"
+   ]
+  }
+ }
+}

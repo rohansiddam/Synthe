@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Synthe signing primitives (stdlib only).
 
 - Canonical JSON for signing (sorted keys, no insignificant whitespace,
@@ -273,3 +274,22 @@ def find_key(registry: dict | None, agent_id: str, kid: str | None):
             if len(raw) == 32:
                 return raw
     return None
+
+
+def usable_keys(registry: dict | None, agent_id: str) -> list:
+    """The kids of the agent's registered Ed25519 keys that decode to 32 bytes.
+    More than one means a signature must name its kid: find_key(kid=None) picks
+    the first, which after an appended rotation is the old key."""
+    if not registry or not isinstance(agent_id, str):
+        return []
+    entry = registry.get("agents", {}).get(agent_id) or {}
+    kids = []
+    for k in entry.get("keys", []) or []:
+        if not isinstance(k, dict) or k.get("alg", ALG) != ALG:
+            continue
+        try:
+            if len(unb64u(k.get("public_key", ""))) == 32:
+                kids.append(k.get("kid"))
+        except Exception:
+            continue
+    return kids

@@ -1,0 +1,192 @@
+{
+ "name": "expiry-unknown-outcome",
+ "description": "Claim RESERVED past 24h TTL; outcome unknown.",
+ "entry": "validate",
+ "packet": {
+  "handoff": {
+   "schema_version": "0.1",
+   "id": "h-k-exp-2",
+   "trace_id": "t-k-exp-2",
+   "idempotency_key": "k-exp-2",
+   "on_failure": "reject",
+   "from": "planner",
+   "to": "builder",
+   "purpose": "add a flag and push it",
+   "inputs": {
+    "artifact_refs": [
+     {
+      "path": "task.md",
+      "sha256": "c91de34ef6c9d16303e37ac4983b23db8a92d46c8692fcc301ad4be4d133aba4"
+     }
+    ],
+    "state_revision": "rev-1"
+   },
+   "scope": {
+    "owned_paths": [
+     "src/**"
+    ],
+    "forbidden": []
+   },
+   "authority": {
+    "allowed_tools": [
+     "read_repo",
+     "edit_files",
+     "run_tests",
+     "git_push"
+    ],
+    "approval_required_for": [
+     "git_push"
+    ],
+    "budget": {
+     "tokens": 50000,
+     "usd": 5,
+     "minutes": 60
+    },
+    "approvals": [
+     {
+      "action": "push_branch",
+      "approver": "rishab",
+      "expires_at": "2026-10-12T21:51:34Z",
+      "params": {
+       "remote": "origin",
+       "branch": "feature/x"
+      },
+      "kid": "rishab-1",
+      "sig": "kHxXfzmAQZvU26z4p18aggiyPYJ81cOYbA2eshPPwHW61TevYypNCN3QI4OMVtgDfm9T3JWdsVTp7nwBdpgPCw"
+     }
+    ]
+   },
+   "planned_actions": [
+    {
+     "name": "edit",
+     "tool": "edit_files"
+    },
+    {
+     "name": "push_branch",
+     "tool": "git_push",
+     "params": {
+      "remote": "origin",
+      "branch": "feature/x"
+     }
+    }
+   ],
+   "acceptance": {
+    "expires_at": "2026-11-04T21:51:34Z",
+    "output_schema": "code_change.v1",
+    "required_evidence": [
+     "test_output"
+    ],
+    "evidence": [
+     {
+      "kind": "test_output",
+      "ref": "task.md"
+     }
+    ]
+   }
+  },
+  "signature": {
+   "signer": "planner",
+   "kid": "planner-1",
+   "alg": "Ed25519",
+   "sig": "ZsTbKHJ-RWEQlHzvigEglZiylX6seiMTxE_Z5WCPmpb7hCFuln1EPcsFj7zUKx75EkyrgmXEh-mHutLZGHYICw"
+  }
+ },
+ "registry": {
+  "agents": {
+   "planner": {
+    "role": "sender",
+    "keys": [
+     {
+      "kid": "planner-1",
+      "alg": "Ed25519",
+      "public_key": "TcRyOOZANtqurQB-wcCXUG5mbksU7Rx8XzvDDxNRPHo"
+     }
+    ]
+   },
+   "builder": {
+    "role": "receiver",
+    "keys": [
+     {
+      "kid": "builder-1",
+      "alg": "Ed25519",
+      "public_key": "ScnuxNTNTj8O_GJTT3GfYApZEfmXaQSvNTm6rLR23u8"
+     }
+    ],
+    "policy": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "forbidden": [
+      "force_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "trusted_approvers": [
+      "rishab"
+     ],
+     "budget": {
+      "tokens": 200000,
+      "usd": 10,
+      "minutes": 120
+     },
+     "require_signatures": true,
+     "require_signed_approvals": true,
+     "require_planned_actions": true,
+     "defaults": {
+      "owned_paths": [
+       "src/**"
+      ],
+      "output_schema": "code_change.v1",
+      "budget": {
+       "tokens": 100000,
+       "usd": 5,
+       "minutes": 60
+      }
+     }
+    }
+   },
+   "rishab": {
+    "role": "approver",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "rishab-1",
+      "alg": "Ed25519",
+      "public_key": "NcVVPw6Zy4Fc70FVXfcZFbfIX1NFnycf-CWw0aA4TCA"
+     }
+    ]
+   },
+   "mallory": {
+    "role": "untrusted",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "mallory-1",
+      "alg": "Ed25519",
+      "public_key": "gDYu43kkEhwyfUX7tkAorJPHa3OaApnqSsokcbnrKS8"
+     }
+    ]
+   }
+  }
+ },
+ "expected": {
+  "decision": "REJECT",
+  "state": "unknown",
+  "codes": [
+   "unknown_outcome"
+  ]
+ },
+ "ledger": {
+  "k-exp-2": {
+   "state": "RESERVED",
+   "handoff_id": "h-k-exp-2",
+   "trace_id": "t-k-exp-2",
+   "to": "builder",
+   "reserved_at": "2026-10-04T20:51:34Z"
+  }
+ }
+}

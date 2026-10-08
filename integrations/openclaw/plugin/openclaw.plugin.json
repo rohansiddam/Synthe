@@ -1,0 +1,29 @@
+{
+  "id": "synthe-barrier",
+  "name": "Synthe commit barrier",
+  "description": "Blocks direct git pushes and shows what waits for your approval in Synthe",
+  "categories": ["developer-tools"],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "brokerSocket": {
+        "type": "string",
+        "description": "The Synthe broker address (unix:///path/to/broker.sock or tcp://127.0.0.1:8791); default $SYNTHE_BROKER"
+      },
+      "blockDirectPush": {
+        "type": "boolean",
+        "default": true,
+        "description": "Block tool calls that would push or publish to a git remote around Synthe"
+      },
+      "statusLine": {
+        "type": "boolean",
+        "default": true,
+        "description": "Add one line of Synthe status (waiting approvals, last receipt) to each turn"
+      }
+    }
+  }
+}

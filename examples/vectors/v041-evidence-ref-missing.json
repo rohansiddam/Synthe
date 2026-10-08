@@ -1,0 +1,185 @@
+{
+ "name": "evidence-ref-missing",
+ "description": "Evidence ref not found.",
+ "entry": "validate",
+ "packet": {
+  "handoff": {
+   "schema_version": "0.1",
+   "id": "h-k-badref",
+   "trace_id": "t-k-badref",
+   "idempotency_key": "k-badref",
+   "on_failure": "reject",
+   "from": "planner",
+   "to": "builder",
+   "purpose": "add a flag and push it",
+   "inputs": {
+    "artifact_refs": [
+     {
+      "path": "task.md",
+      "sha256": "c91de34ef6c9d16303e37ac4983b23db8a92d46c8692fcc301ad4be4d133aba4"
+     }
+    ],
+    "state_revision": "rev-1"
+   },
+   "scope": {
+    "owned_paths": [
+     "src/**"
+    ],
+    "forbidden": []
+   },
+   "authority": {
+    "allowed_tools": [
+     "read_repo",
+     "edit_files",
+     "run_tests",
+     "git_push"
+    ],
+    "approval_required_for": [
+     "git_push"
+    ],
+    "budget": {
+     "tokens": 50000,
+     "usd": 5,
+     "minutes": 60
+    },
+    "approvals": [
+     {
+      "action": "push_branch",
+      "approver": "rishab",
+      "expires_at": "2026-10-12T21:19:38Z",
+      "params": {
+       "remote": "origin",
+       "branch": "feature/x"
+      },
+      "kid": "rishab-1",
+      "sig": "aWHYKQ1im7ONx7ftO96E_4Tbmy-2Is3bM0wC4aoEu9XsIC1o-ap8df82DNqcXRVbrotZ5CLStZWft8F0AMWYBg"
+     }
+    ]
+   },
+   "planned_actions": [
+    {
+     "name": "edit",
+     "tool": "edit_files"
+    },
+    {
+     "name": "push_branch",
+     "tool": "git_push",
+     "params": {
+      "remote": "origin",
+      "branch": "feature/x"
+     }
+    }
+   ],
+   "acceptance": {
+    "expires_at": "2026-11-04T21:19:38Z",
+    "output_schema": "code_change.v1",
+    "required_evidence": [
+     "test_output"
+    ],
+    "evidence": [
+     {
+      "kind": "test_output",
+      "ref": "missing.md"
+     }
+    ]
+   }
+  },
+  "signature": {
+   "signer": "planner",
+   "kid": "planner-1",
+   "alg": "Ed25519",
+   "sig": "N-bKCv24-c1kJ4tqADUMCBXKPSp5G-pHre-8EcOUt3Vnc2XLK_5PGSmIZrU5NzlBuEfxNsYW0cbLo7nX77zDCw"
+  }
+ },
+ "registry": {
+  "agents": {
+   "planner": {
+    "role": "sender",
+    "keys": [
+     {
+      "kid": "planner-1",
+      "alg": "Ed25519",
+      "public_key": "bOPqoRHeca9uPKT-1Ugh2MWaEU2Z9Xy-e6BWAuh1O7E"
+     }
+    ]
+   },
+   "builder": {
+    "role": "receiver",
+    "keys": [
+     {
+      "kid": "builder-1",
+      "alg": "Ed25519",
+      "public_key": "BquwTJ0ohzy18q3CM_3pfGIc6OslmK-DVGeZ9jjozwo"
+     }
+    ],
+    "policy": {
+     "allowed_tools": [
+      "read_repo",
+      "edit_files",
+      "run_tests",
+      "git_push"
+     ],
+     "forbidden": [
+      "force_push"
+     ],
+     "approval_required_for": [
+      "git_push"
+     ],
+     "trusted_approvers": [
+      "rishab"
+     ],
+     "budget": {
+      "tokens": 200000,
+      "usd": 10,
+      "minutes": 120
+     },
+     "require_signatures": true,
+     "require_signed_approvals": true,
+     "require_planned_actions": true,
+     "defaults": {
+      "owned_paths": [
+       "src/**"
+      ],
+      "output_schema": "code_change.v1",
+      "budget": {
+       "tokens": 100000,
+       "usd": 5,
+       "minutes": 60
+      }
+     }
+    }
+   },
+   "rishab": {
+    "role": "approver",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "rishab-1",
+      "alg": "Ed25519",
+      "public_key": "DUNsWzTbdQaOkbi2BuE6cYBfyU8BhnHs7np9ghl-8cg"
+     }
+    ]
+   },
+   "mallory": {
+    "role": "untrusted",
+    "kind": "human",
+    "keys": [
+     {
+      "kid": "mallory-1",
+      "alg": "Ed25519",
+      "public_key": "I57ssyjtj6XqEGXZBCg2w2tJcXxF57Vd-x9O1ET8BHQ"
+     }
+    ]
+   }
+  }
+ },
+ "expected": {
+  "decision": "REJECT",
+  "state": "incomplete",
+  "codes": [
+   "evidence_ref_missing"
+  ]
+ },
+ "ledger": {},
+ "verify_evidence": true
+}

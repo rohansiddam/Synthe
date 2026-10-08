@@ -1,0 +1,4 @@
+{"name": "synthe-test-echo-shell", "version": "0.0.1", "type": "module", "private": true,
+ "peerDependencies": {"openclaw": ">=2026.9.8"},
+ "openclaw": {"extensions": ["./index.ts"], "compat": {"pluginApi": ">=2026.9.8", "minGatewayVersion": "2026.9.8"},
+              "build": {"openclawVersion": "2026.9.8", "pluginSdkVersion": "2026.9.8"}}}

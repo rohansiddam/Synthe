@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Handoff Contract validator (packet wire format v0.1; stdlib only).
 
 Validates one handoff packet before a receiver executes. Returns ACCEPT or a
@@ -31,9 +32,11 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -44,6 +47,70 @@ REQUIRED = [
 FAILURE_STATES = {"invalid", "incomplete", "stale", "conflicting", "blocked", "retryable", "duplicate", "unknown"}
 # Evidence kinds that must be verbatim-fidelity by default (rule/code text).
 VERBATIM_KINDS = {"code_text", "verbatim_quote", "legal_text"}
+
+
+class StrictJSONError(ValueError):
+    """JSON that parses differently across parsers. `code` is the reason code to report."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _strict_pairs(pairs):
+    obj = {}
+    for k, v in pairs:
+        if k in obj:
+            name = k if len(k) <= 64 else k[:61] + "..."
+            raise StrictJSONError(f"duplicate_field:{name}",
+                                  f"the JSON object has the key {name!r} twice; parsers disagree on "
+                                  f"which copy counts, so it is refused")
+        obj[k] = v
+    return obj
+
+
+def _strict_constant(name):
+    raise StrictJSONError("malformed:non_finite_number", f"{name} is not a JSON number")
+
+
+def _strict_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise StrictJSONError("malformed:non_finite_number", f"the number {text[:32]} overflows to infinity")
+    return value
+
+
+def strict_loads(text):
+    """json.loads for anything an agent or a peer sent. It refuses what parsers
+    disagree on: a duplicate key (Python keeps the last copy, other parsers the
+    first, so a signer and a checker could see different packets) and NaN,
+    Infinity or a number that overflows to infinity (not JSON, and not
+    canonicalizable for a signature). Raises StrictJSONError(code, message)."""
+    return json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_strict_constant,
+                      parse_float=_strict_float)
+
+
+def non_finite_path(obj, root: str = "packet") -> str | None:
+    """Where the first NaN or Infinity sits in an already-parsed object, or None.
+    The defense for callers that hand check() a dict parsed leniently."""
+    stack = [(root, obj)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            return path
+        if isinstance(value, dict):
+            stack.extend((f"{path}.{k}", v) for k, v in value.items())
+        elif isinstance(value, list):
+            stack.extend((f"{path}[{i}]", v) for i, v in enumerate(value))
+    return None
+
+
+def _non_finite_reject(packet) -> dict | None:
+    where = non_finite_path(packet)
+    if where is None:
+        return None
+    return _reject("invalid", "malformed:non_finite_number",
+                   f"{where} is NaN or Infinity, which is not a JSON number")
 
 
 def now_utc() -> dt.datetime:
@@ -65,7 +132,132 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+SQLITE_LEDGER_SUFFIXES = (".sqlite", ".sqlite3")
+
+
+def sqlite_ledger(path: Path | None) -> bool:
+    return bool(path) and str(path).lower().endswith(SQLITE_LEDGER_SUFFIXES)
+
+
+def _sqlite_connect(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
+        conn.execute("CREATE TABLE IF NOT EXISTS claims "
+                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL CHECK(json_valid(value)))")
+        conn.commit()
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+class SQLiteLedger(dict):
+    """Lazy dict-compatible view over ledger-v2 rows.
+
+    Normal claim paths touch one key. Cross-key semantics (`depends_on`,
+    `exclusive_paths`) intentionally call items() and load the hot set.
+    """
+
+    def __init__(self, path: Path, conn: sqlite3.Connection | None = None):
+        super().__init__()
+        self.path, self.conn = Path(path), conn
+        self.dirty_keys: set[str] = set()
+        self.loaded_all = False
+
+    def _rows(self, sql, params=()):
+        if self.conn is not None:
+            return self.conn.execute(sql, params).fetchall()
+        conn = _sqlite_connect(self.path)
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+    def _load_one(self, key):
+        row = self._rows("SELECT value FROM claims WHERE key = ?", (key,))
+        if not row:
+            return None
+        value = json.loads(row[0][0])
+        dict.__setitem__(self, key, value)
+        return value
+
+    def _load_all(self):
+        if not self.loaded_all:
+            for key, value in self._rows("SELECT key, value FROM claims"):
+                if not dict.__contains__(self, key):
+                    dict.__setitem__(self, key, json.loads(value))
+            self.loaded_all = True
+
+    def get(self, key, default=None):
+        if dict.__contains__(self, key):
+            return dict.get(self, key, default)
+        value = self._load_one(key)
+        return default if value is None else value
+
+    def __getitem__(self, key):
+        value = self.get(key, None)
+        if value is None and not dict.__contains__(self, key):
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, value)
+        self.dirty_keys.add(key)
+
+    def __contains__(self, key):
+        return self.get(key, None) is not None
+
+    def items(self):
+        self._load_all()
+        return dict.items(self)
+
+    def values(self):
+        self._load_all()
+        return dict.values(self)
+
+    def keys(self):
+        self._load_all()
+        return dict.keys(self)
+
+    def __iter__(self):
+        self._load_all()
+        return dict.__iter__(self)
+
+    def __len__(self):
+        self._load_all()
+        return dict.__len__(self)
+
+    def __eq__(self, other):
+        self._load_all()
+        return dict.__eq__(self, other)
+
+    def flush(self):
+        if self.conn is None:
+            raise RuntimeError("SQLite ledger writes need a locked transaction")
+        # Existing entries are mutable dicts. LockedLedger.dirty tells us an
+        # operation changed one, so persist every row this transaction
+        # actually loaded (normally only the claim key and its dependencies).
+        for key in list(dict.keys(self)):
+            self.conn.execute("INSERT INTO claims(key, value) VALUES (?, ?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                              (key, json.dumps(dict.__getitem__(self, key), sort_keys=True, separators=(",", ":"))))
+        self.dirty_keys.clear()
+
+
 def load_ledger(path: Path) -> dict:
+    if sqlite_ledger(path):
+        if not path or not Path(path).exists():
+            return {}
+        try:
+            conn = _sqlite_connect(Path(path))
+            conn.execute("SELECT key FROM claims LIMIT 1").fetchone()
+            conn.close()
+            return SQLiteLedger(Path(path))
+        except (OSError, sqlite3.DatabaseError):
+            return {"_corrupt": True}
     if path and path.exists():
         try:
             return json.loads(path.read_text()) or {}
@@ -77,11 +269,40 @@ def load_ledger(path: Path) -> dict:
 def save_ledger(path: Path, ledger: dict) -> None:
     """Write the ledger atomically: temp file in the same dir + os.replace,
     so a concurrent reader never observes a torn file."""
-    if path:
+    if path and sqlite_ledger(path):
+        try:
+            conn = _sqlite_connect(Path(path))
+            with conn:
+                conn.execute("DELETE FROM claims")
+                conn.executemany("INSERT INTO claims(key, value) VALUES (?, ?)",
+                                 [(str(k), json.dumps(v, sort_keys=True, separators=(",", ":")))
+                                  for k, v in ledger.items()])
+            conn.close()
+        except sqlite3.DatabaseError:
+            raise ValueError("ledger database is corrupt") from None
+    elif path:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
         os.replace(tmp, path)
+
+
+def migrate_ledger(source: Path, destination: Path) -> dict:
+    """Copy a legacy JSON ledger into a new SQLite/WAL ledger. Never changes
+    or deletes the source and refuses to overwrite a destination."""
+    source, destination = Path(source), Path(destination)
+    if sqlite_ledger(source) or not sqlite_ledger(destination):
+        raise ValueError("source must be JSON and destination must end in .sqlite or .sqlite3")
+    if destination.exists():
+        raise FileExistsError(destination)
+    ledger = load_ledger(source)
+    if ledger.get("_corrupt"):
+        raise ValueError("source ledger is corrupt")
+    save_ledger(destination, ledger)
+    copied = load_ledger(destination)
+    if copied.get("_corrupt") or dict(copied.items()) != ledger:
+        raise ValueError("ledger migration verification failed")
+    return {"source": str(source), "destination": str(destination), "entries": len(ledger)}
 
 
 def entry_state(entry: dict) -> str:
@@ -120,9 +341,21 @@ class LockedLedger:
         self.ledger: dict = {}
         self.dirty = False
         self._fh = None
+        self._conn = None
 
     def __enter__(self) -> "LockedLedger":
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if sqlite_ledger(self.path):
+            try:
+                self._conn = _sqlite_connect(self.path)
+                self._conn.execute("BEGIN IMMEDIATE")
+                self.ledger = SQLiteLedger(self.path, self._conn)
+            except (OSError, sqlite3.DatabaseError):
+                if self._conn is not None:
+                    self._conn.close()
+                    self._conn = None
+                self.ledger = {"_corrupt": True}
+            return self
         self._fh = open(self.path.with_name(self.path.name + ".lock"), "a+")
         try:
             import fcntl
@@ -134,9 +367,16 @@ class LockedLedger:
 
     def __exit__(self, *exc) -> bool:
         try:
-            if self.dirty:
+            if self._conn is not None:
+                if self.dirty:
+                    self.ledger.flush()
+                self._conn.commit()
+            elif self.dirty:
                 save_ledger(self.path, self.ledger)
         finally:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
             if self._fh is not None:
                 try:
                     import fcntl
@@ -248,6 +488,11 @@ _LIST_SETS = ("forbidden", "approval_required_for", "forbidden_paths")  # restri
 _LIST_CEILINGS = ("allowed_tools", "trusted_approvers")    # grants: intersection
 _FLAGS = ("require_signatures", "require_signed_approvals", "verify_evidence",
           "require_planned_actions", "exclusive_paths")
+_MINIMUMS = ("max_ttl_hours",)                              # ceilings on time: the smallest wins
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def receiver_policy(registry: dict | None, receiver: str) -> dict | None:
@@ -281,6 +526,13 @@ def receiver_policy(registry: dict | None, receiver: str) -> dict | None:
                 merged["defaults"] = {**merged.get("defaults", {}), **v}
             elif k in _FLAGS:
                 merged[k] = bool(merged.get(k)) or bool(v)
+            elif k in _MINIMUMS:
+                if k not in merged:
+                    merged[k] = v
+                elif _is_number(merged[k]) and _is_number(v):
+                    merged[k] = min(merged[k], v)
+                elif _is_number(merged[k]):
+                    merged[k] = v  # a malformed layer is kept, so validation refuses it (fail closed)
             else:
                 merged[k] = v
     return merged
@@ -430,6 +682,11 @@ def _verify_packet_signature(packet: dict, h_signed: dict, registry: dict | None
         fail("invalid", "signature_signer_mismatch",
              f"packet signed by '{signer}' but claims to be from '{h_signed.get('from')}'", reasons)
         return
+    if sig.get("kid") is None and len(sc.usable_keys(registry, signer)) > 1:
+        fail("invalid", "signature_kid_required",
+             f"'{signer}' has more than one key on record, so the signature must name its kid "
+             f"(without one, a rotated-out key could still be picked)", reasons)
+        return
     key = sc.find_key(registry, signer, sig.get("kid"))
     if key is None:
         fail("invalid", "signature_key_unknown",
@@ -465,14 +722,21 @@ def _approval_ok(name: str, candidates: list, h: dict, registry, policy, at) -> 
                          f"approval for '{name}' is from '{appr.get('approver')}', "
                          f"who is not a trusted approver for this receiver"))
         if appr.get("sig") is not None:
+            ambiguous = False
             try:
                 import synthe_crypto as sc
-                key = sc.find_key(registry, appr.get("approver"), appr.get("kid"))
+                ambiguous = (appr.get("kid") is None
+                             and len(sc.usable_keys(registry, appr.get("approver"))) > 1)
+                key = None if ambiguous else sc.find_key(registry, appr.get("approver"), appr.get("kid"))
                 good = key is not None and sc.verify_bytes(
                     key, sc.approval_signing_input(appr, h), sc.unb64u(appr["sig"]))
             except Exception:
                 good = False
-            if not good:
+            if ambiguous:
+                mine.append(("approval_kid_required",
+                             f"approval for '{name}' names no kid, and approver "
+                             f"'{appr.get('approver')}' has more than one key on record"))
+            elif not good:
                 mine.append(("approval_signature_invalid",
                              f"approval for '{name}' carries a signature that does not verify "
                              f"for approver '{appr.get('approver')}' on this handoff"))
@@ -570,7 +834,7 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
              workspace: Path | None, at: dt.datetime,
              reserve_ttl_hours: float = 24.0, info: dict | None = None,
              verify_evidence: bool = False, extra_approvals: list | None = None,
-             defer_approvals=None) -> tuple[bool, list]:
+             defer_approvals=None, as_receiver: str | None = None) -> tuple[bool, list]:
     """Validate one packet (sections 6-7 of SPEC.md).
 
     v0.5, both default off: `extra_approvals` are signed approvals for this
@@ -606,6 +870,9 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
     for name in ("id", "idempotency_key", "trace_id", "from", "to", "purpose"):
         if not isinstance(h[name], str):
             fail("invalid", f"malformed:{name}", f"{name} must be a string", reasons)
+    if as_receiver is not None and h.get("to") != as_receiver:
+        fail("invalid", "receiver_mismatch",
+             f"handoff is addressed to {h.get('to')!r}, not the authenticated receiver {as_receiver!r}", reasons)
 
     scope, auth, acc = h["scope"], h["authority"], h["acceptance"]
     for d, name in ((scope, "scope"), (auth, "authority"), (acc, "acceptance"), (h["inputs"], "inputs")):
@@ -712,6 +979,15 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         fail("invalid", "bad_expires_at", f"acceptance.expires_at: {why}", reasons)
     elif exp <= at:
         fail("stale", "handoff_expired", f"handoff expired at {acc['expires_at']}", reasons)
+    max_ttl = (policy or {}).get("max_ttl_hours")
+    if (max_ttl is not None and not _is_number(max_ttl)) or (_is_number(max_ttl) and max_ttl <= 0):
+        fail("invalid", "registry_malformed",
+             "receiver policy max_ttl_hours must be a positive number of hours", reasons)
+    elif max_ttl is not None and exp is not None and (exp - at).total_seconds() > max_ttl * 3600:
+        fail("invalid", "ttl_exceeded",
+             f"handoff stays valid until {acc['expires_at']}, longer than this receiver's maximum "
+             f"of {max_ttl} hours from now; a long-lived handoff is a bearer token for whoever "
+             f"holds its bytes", reasons)
 
     # 5. authority: planned actions vs tools / forbidden / approvals / budget,
     #    with the receiver policy as a ceiling the packet can only narrow.
@@ -864,18 +1140,22 @@ def _result(ok: bool, reasons: list, h: dict, info: dict) -> dict:
 def check(packet, *, registry: dict | None, ledger_path: Path | None,
           workspace: Path | None, dry_run: bool = False,
           reserve_ttl_hours: float = 24.0, verify_evidence: bool = False,
-          extra_approvals: list | None = None, defer_approvals=None) -> dict:
+          extra_approvals: list | None = None, defer_approvals=None,
+          as_receiver: str | None = None) -> dict:
     """Validate a packet and (unless dry_run) atomically record a RESERVED
     claim on ACCEPT. Returns the verdict as a dict. Used by the CLI, the GitHub
     Action and every integration, so every entry point shares one code path."""
     if not isinstance(packet, dict):
         return _reject("invalid", "missing_handoff", "packet must be a JSON object with a 'handoff' object")
+    bad = _non_finite_reject(packet)
+    if bad:
+        return bad
     h = packet.get("handoff") if isinstance(packet.get("handoff"), dict) else {}
     info: dict = {}
     kwargs = dict(registry=registry, workspace=workspace, at=now_utc(),
                   reserve_ttl_hours=reserve_ttl_hours, info=info,
                   verify_evidence=verify_evidence, extra_approvals=extra_approvals,
-                  defer_approvals=defer_approvals)
+                  defer_approvals=defer_approvals, as_receiver=as_receiver)
     if ledger_path is not None and not dry_run:
         # Atomic claim: validate and record RESERVED under one lock, so two
         # concurrent presentations of the same key cannot both pass.
@@ -971,6 +1251,9 @@ def complete(packet, ledger_path: Path | None, claim_token: str | None = None,
     if not isinstance(h, dict) or not h.get("idempotency_key"):
         return _reject("invalid", "missing_idempotency_key",
                        "packet must contain a 'handoff' object with an idempotency_key")
+    bad = _non_finite_reject(packet)
+    if bad:
+        return bad
     if not ledger_path:
         return _reject("invalid", "ledger_required",
                        "--complete requires --ledger (the claim lives there)")
@@ -1008,6 +1291,9 @@ def release(packet, ledger_path: Path | None, reserve_ttl_hours: float = 24.0,
     if not isinstance(h, dict) or not h.get("idempotency_key"):
         return _reject("invalid", "missing_idempotency_key",
                        "packet must contain a 'handoff' object with an idempotency_key")
+    bad = _non_finite_reject(packet)
+    if bad:
+        return bad
     if not ledger_path:
         return _reject("invalid", "ledger_required", "--release requires --ledger")
     key = h["idempotency_key"]
@@ -1135,8 +1421,8 @@ def load_registry(path) -> tuple[dict | None, dict | None]:
     if not path:
         return None, None
     try:
-        reg = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        reg = strict_loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:  # ValueError covers JSONDecodeError and StrictJSONError
         return None, _reject("invalid", "registry_unreadable", f"cannot read registry: {exc}")
     if not isinstance(reg, dict) or not isinstance(reg.get("agents", {}), dict):
         return None, _reject("invalid", "registry_malformed", "registry must be an object with an 'agents' object")
@@ -1170,11 +1456,14 @@ def main(argv=None) -> int:
     ap.add_argument("--verify-evidence", action="store_true",
                     help="require every evidence item to reference a workspace file and "
                          "check pinned sha256 hashes (also enabled by registry policy)")
+    ap.add_argument("--as-receiver", help="authenticated receiver identity; reject packets addressed elsewhere")
     args = ap.parse_args(argv)
 
     try:
-        packet = json.loads(Path(args.packet).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        packet = strict_loads(Path(args.packet).read_text())
+    except StrictJSONError as exc:
+        result = _reject("invalid", exc.code, f"packet refused: {exc}")
+    except (OSError, ValueError) as exc:  # ValueError covers JSONDecodeError and oversized integers
         result = _reject("invalid", "packet_unreadable", f"cannot read packet: {exc}")
     else:
         if args.complete:
@@ -1190,7 +1479,7 @@ def main(argv=None) -> int:
                 ledger_path=Path(args.ledger) if args.ledger else None,
                 workspace=Path(args.workspace) if args.workspace else None,
                 dry_run=args.dry_run, reserve_ttl_hours=args.reserve_ttl_hours,
-                verify_evidence=args.verify_evidence)
+                verify_evidence=args.verify_evidence, as_receiver=args.as_receiver)
     print(json.dumps(result, indent=2))
     return exit_code(result)
 
