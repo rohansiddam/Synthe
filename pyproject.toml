@@ -8,8 +8,9 @@ version = "0.6.0"
 description = "The commit barrier for AI agents: agents propose, Synthe commits, anyone can verify."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0 AND LicenseRef-FSL-1.1-ALv2"
+license = "Apache-2.0 AND LicenseRef-FSL-1.1-ALv2"  # LICENSING.md: which file is which
 license-files = ["LICENSE", "LICENSE-FSL.md", "LICENSING.md"]
+# The checker runs on the stdlib alone (pure-Python Ed25519); the broker wants the fast path.
 dependencies = ["cryptography>=41"]
 
 [project.optional-dependencies]
@@ -30,14 +31,22 @@ git-remote-synthe = "synthe_git_remote:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-py-modules = ["handoff_check","synthe_crypto","synthe_sign","synthe_plan","synthe_commit","synthe_broker","synthe_client","synthe_mcp","synthe_a2a","synthe_approve","synthe_init","synthe_task","synthe_ui","synthe_git_remote","synthe_touchid","synthe_studio","synthe_studio_model"]
+py-modules = [
+  "handoff_check", "synthe_crypto", "synthe_sign", "synthe_plan", "synthe_commit",
+  "synthe_broker", "synthe_client", "synthe_mcp", "synthe_a2a", "synthe_approve",
+  "synthe_init", "synthe_task", "synthe_ui", "synthe_git_remote", "synthe_touchid", "synthe_studio", "synthe_studio_model",
+]
 
 [tool.setuptools.data-files]
 "share/synthe" = ["src/synthe_commit_ui.html", "schema/handoff.schema.json"]
 "share/synthe/openclaw" = ["integrations/openclaw/README.md"]
-"share/synthe/openclaw/plugin" = ["integrations/openclaw/plugin/package.json","integrations/openclaw/plugin/openclaw.plugin.json","integrations/openclaw/plugin/index.ts","integrations/openclaw/plugin/policy.ts","integrations/openclaw/plugin/broker.ts"]
+"share/synthe/openclaw/plugin" = [
+  "integrations/openclaw/plugin/package.json", "integrations/openclaw/plugin/openclaw.plugin.json",
+  "integrations/openclaw/plugin/index.ts", "integrations/openclaw/plugin/policy.ts",
+  "integrations/openclaw/plugin/broker.ts",
+]
 "share/synthe/openclaw/skill/synthe" = ["integrations/openclaw/skill/synthe/SKILL.md"]
-"share/synthe/studio-demo" = ["examples/studio-demo/sample.json","examples/studio-demo/README.md"]
+"share/synthe/studio-demo" = ["examples/studio-demo/sample.json", "examples/studio-demo/README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
