@@ -119,8 +119,13 @@ bytes never change.
 
 ## 5. Signatures
 
-- Algorithm: Ed25519 (RFC 8032). The checker uses `cryptography` when it is installed; otherwise it falls back to a
-  pure-Python implementation, which verifies fine, but its signing is not constant-time, so don't use it for production keys.
+- Packet signatures and receipts use Ed25519 (RFC 8032). The checker uses `cryptography` when it is
+  installed; otherwise it falls back to a pure-Python implementation, which verifies fine, but its
+  signing is not constant-time, so don't use it for production keys.
+- Approval signatures use the algorithm declared by the registered key: Ed25519, or ES256 (ECDSA
+  P-256 with SHA-256 and a 64-byte `r || s` signature). ES256 is approval-only; it cannot sign a
+  packet or receipt. The macOS Touch ID integration uses an ES256 key in the Secure Enclave. See
+  [`docs/TOUCHID.md`](docs/TOUCHID.md).
 - Canonical JSON: sorted keys, compact separators, UTF-8, whole-number floats
   written as ints.
 - **Packet signature** signs `"synthe/handoff-signature/v1\n" + canonical(handoff)`.
@@ -129,7 +134,8 @@ bytes never change.
   That binds an approval to exactly one handoff, so it can't be replayed onto another.
 - Order: approvers sign first, then the sender signs. The sender's signature
   covers the approvals list.
-- **`kid` (unreleased).** When the signer or approver has more than one key on record, the signature
+- **`kid` (unreleased).** When the signer or approver has more than one usable key for that signature
+  type on record, the signature
   must name its `kid`: `signature_kid_required` for a packet, `approval_kid_required` for an
   approval. Without it the first listed key was picked, so after a rotation that appended the new key
   without removing the old one, the old (possibly leaked) key still verified.

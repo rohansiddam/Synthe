@@ -8,7 +8,8 @@
 An agent proposes a push and the broker holds it, staged, until a human approves. This command
 lists what the broker is holding, shows one proposal the way the broker will push it (the diff
 from the broker's own copy, never the agent's description of it; study F03), and on "approve"
-signs a detached approval with your passphrase-protected key. The approval pins that exact
+signs a detached approval with your Touch ID key (if you set one up with `synthe-init touchid`;
+the prompt names the branch, commit and files) or your passphrase-protected key. The approval pins that exact
 commit and lasts a short time (30 minutes by default). The broker then pushes only if nothing
 moved since, and writes a signed receipt either way.
 
@@ -30,11 +31,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import synthe_client as scl  # noqa: E402
 import synthe_sign as ss  # noqa: E402
+import synthe_touchid as st  # noqa: E402
 import synthe_ui as sui  # noqa: E402
 
 DEFAULT_EXPIRES_MIN = 30
 MAX_EXPIRES_MIN = 24 * 60
 DEFAULT_KEY = Path("~/.synthe/approver.key.json")
+DEFAULT_TOUCHID_KEY = Path("~/.synthe") / st.KEY_NAME
 PREVIEW_LINES = 60
 
 # C0/C1 controls except tab and newline (ESC starts ANSI sequences; CR overwrites a line), DEL,
@@ -133,6 +136,13 @@ def render(detail: dict, full: bool = False, ui=None) -> str:
     return "\n".join(_paint(lines, ui))
 
 
+def diff_has_more(detail: dict) -> bool:
+    """Whether `v` can reveal patch lines not already present in the approval card."""
+    ch = detail.get("changes") or {}
+    return bool(ch.get("available") and
+                len(clean(ch.get("patch") or "").splitlines()) > PREVIEW_LINES)
+
+
 def build_approval(detail: dict, key: dict, expires_in_min: int = DEFAULT_EXPIRES_MIN, now=None) -> dict:
     """A detached approval for exactly this proposal: the plan's params plus the commit the broker
     showed, signed with the approver's key, valid for `expires_in_min` minutes."""
@@ -152,6 +162,19 @@ def build_approval(detail: dict, key: dict, expires_in_min: int = DEFAULT_EXPIRE
     expires = (now or dt.datetime.now(dt.timezone.utc)) + dt.timedelta(minutes=expires_in_min)
     return ss.detached_approval(packet, key, detail["action"], expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
                                 {**params, "commit": commit})
+
+
+def touchid_reason(detail: dict) -> str:
+    """What the Touch ID prompt says, from the broker's view of the proposal (names cleaned: an agent
+    chose the branch and file names, and they must not fake the prompt's wording)."""
+    eff, ch = detail.get("effect") or {}, detail.get("changes") or {}
+    files = ch.get("files") or []
+    first = ", ".join(clean(f.get("path"), True) for f in files[:3] if isinstance(f, dict))
+    more = f" and {len(files) - 3} more" if len(files) > 3 else ""
+    what = f"{len(files)} file{'s' if len(files) != 1 else ''}" + (f" ({first}{more})" if first else "")
+    text = (f"approve pushing {clean(eff.get('branch'), True)} at {_short(eff.get('commit'))} "
+            f"to {clean(eff.get('remote') or 'origin', True)}: {what}")
+    return text[:300]
 
 
 def summarize(result: dict, ui=None) -> str:
@@ -182,6 +205,10 @@ def main(argv=None) -> int:
     ap.add_argument("--broker", help="unix:///path/to/broker.sock or tcp://host:port (default $SYNTHE_BROKER)")
     ap.add_argument("--key", default=os.environ.get("SYNTHE_APPROVER_KEY", str(DEFAULT_KEY)),
                     help=f"your encrypted approver key (default $SYNTHE_APPROVER_KEY or {DEFAULT_KEY})")
+    ap.add_argument("--touchid-key", default=os.environ.get("SYNTHE_TOUCHID_KEY", str(DEFAULT_TOUCHID_KEY)),
+                    help=f"your Touch ID key, used when it exists (default {DEFAULT_TOUCHID_KEY})")
+    ap.add_argument("--passphrase", action="store_true",
+                    help="approve with the passphrase key even if a Touch ID key is set up")
     ap.add_argument("--id", help="go straight to this proposal (idempotency_key/action)")
     ap.add_argument("--list", action="store_true", help="list what waits for an approval, then exit")
     ap.add_argument("--expires-in", type=int, default=DEFAULT_EXPIRES_MIN,
@@ -220,9 +247,13 @@ def main(argv=None) -> int:
             continue
         print(render(detail, ui=ui))
         while True:
-            choice = _ask(" [a] approve once   [v] view the whole diff   [s] skip   [q] quit > ")
+            view = "[v] view the whole diff   " if diff_has_more(detail) else ""
+            choice = _ask(f" [a] approve once   {view}[s] skip   [q] quit > ")
             if choice == "v":
-                print(render(detail, full=True, ui=ui))
+                if diff_has_more(detail):
+                    print(render(detail, full=True, ui=ui))
+                else:
+                    print(" The whole diff is already shown above.")
                 continue
             break
         if choice == "q":
@@ -230,12 +261,22 @@ def main(argv=None) -> int:
         if choice != "a":
             print(" Skipped. It stays staged, and it can't be pushed without an approval.")
             continue
+        touchid = not a.passphrase and Path(a.touchid_key).expanduser().is_file()
         try:
-            if key is None:
-                key = ss.load_key(str(Path(a.key).expanduser()), require_encrypted=True)
-                print(f" Approving as {clean(key.get('agent'), True)} (key {clean(key.get('kid'), True)}).")
-            approval = build_approval(detail, key, a.expires_in)
+            if touchid:
+                reason = touchid_reason(detail)
+                signer = st.signing_key(Path(a.touchid_key), reason)
+                print(f" Touch ID as {clean(signer['agent'], True)} (key {clean(signer['kid'], True)}): {reason}.")
+                print(" Touch the sensor to approve, or cancel. (--passphrase uses your passphrase key instead.)")
+                approval = build_approval(detail, signer, a.expires_in)
+            else:
+                if key is None:
+                    key = ss.load_key(str(Path(a.key).expanduser()), require_encrypted=True)
+                    print(f" Approving as {clean(key.get('agent'), True)} (key {clean(key.get('kid'), True)}).")
+                approval = build_approval(detail, key, a.expires_in)
             print(summarize(client.call("submit_approval", approval=approval), ui))
+        except st.TouchIDError as e:
+            print(f"synthe-approve: not approved: {e}. It stays staged.", file=sys.stderr)
         except (ValueError, ss.KeyFileError) as e:
             print(f"synthe-approve: not approved: {e}", file=sys.stderr)
         except scl.BrokerError as e:

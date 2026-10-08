@@ -1,9 +1,9 @@
 # First approved OpenClaw push with Synthe (macOS)
 
-At the end, OpenClaw proposes a push, you read the diff and approve it with your passphrase, and only
-then does Synthe push it. **ENFORCED** means the agent can't push on its own. It runs in its own Mac
-account with no GitHub login, and a hidden `_synthe` user holds the GitHub token. Synthe pushes only
-after your signed approval.
+At the end, OpenClaw proposes a push, you read the diff and approve it with Touch ID (or your
+passphrase fallback), and only then does Synthe push it. **ENFORCED** means the agent can't push on
+its own. It runs in its own Mac account with no GitHub login, and a hidden `_synthe` user holds the
+GitHub token. Synthe pushes only after your signed approval.
 
 You can hand steps 1 and 2 to your coding agent (Claude Code, Codex, OpenClaw): point it at
 `skills/synthe-setup/SKILL.md`. Step 3 is yours, because it's where the secrets are typed. The steps
@@ -57,10 +57,25 @@ Then it does the rest:
 - clones the repo there through the broker (the agent's account needs no GitHub
   access, even to read) and runs the doctor, which should say **ENFORCED**.
 
-## 4. Give OpenClaw its model, and start it through the gateway
+### Optional: enroll Touch ID
 
-The Synthe plugin acts only through OpenClaw's gateway: `openclaw tui --local` and `openclaw chat`
-skip it, which leaves only the wall.
+After setup, enroll a Secure Enclave approval key from this Synthe folder, then install the updated
+public registry and code into the broker:
+
+```bash
+~/synthe-venv/bin/synthe-init touchid
+sudo bash deploy/macos/upgrade.sh
+```
+
+The existing passphrase-protected approval key stays registered as the fallback. Read
+[`docs/TOUCHID.md`](docs/TOUCHID.md) before enrolling: Touch ID protects the approval key, but it does
+not decide whether a diff is safe.
+
+## 4. Give OpenClaw its model
+
+Setup already runs OpenClaw's gateway as a service in the agent's account. The Synthe plugin acts
+only through the gateway: `openclaw tui --local` and `openclaw chat` skip it, which leaves only the
+wall.
 
 ```bash
 sudo -iu openclaw
@@ -71,14 +86,12 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && openclaw onboard
 
 During onboarding, give it your model and API key, and say no to the rest:
 - **Plugins:** it scans the Mac's apps and may pre-tick some to install. Choose "Skip for now".
+- **Gateway service:** skip installing it. Setup already runs the gateway for this account, and it
+  picks up your model without a restart.
 - **At the end it opens a chat for you.** That chat is embedded (`local embedded` in its title bar),
   so the Synthe plugin doesn't run in it. Quit it (Ctrl+C) and continue below.
 
-```bash
-openclaw gateway run
-```
-
-In a second window, also `sudo -iu openclaw`:
+Then chat with OpenClaw through the gateway:
 
 ```bash
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && cd ~/repo && openclaw tui
@@ -104,8 +117,16 @@ When OpenClaw says the push is staged:
 SYNTHE_BROKER=unix:///var/db/synthe-run/broker.sock ~/synthe-venv/bin/synthe-approve
 ```
 
-The diff shown is the broker's own copy, not the agent's description. Approve with `a` and your
-passphrase. The broker pushes, and you get a signed receipt.
+The diff shown is the broker's own copy, not the agent's description. Approve with `a`. If Touch ID
+is enrolled, verify the branch, commit and files in both the terminal card and system prompt before
+touching the sensor. Otherwise Synthe asks for the approval passphrase. To force the fallback even
+after enrollment, run:
+
+```bash
+SYNTHE_BROKER=unix:///var/db/synthe-run/broker.sock ~/synthe-venv/bin/synthe-approve --passphrase
+```
+
+The broker pushes only after the signed approval, and you get a signed receipt.
 
 ## Check it yourself
 

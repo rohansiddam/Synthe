@@ -414,6 +414,35 @@ if [ "$SEPARATE" = 1 ]; then
   # (whose origin is Synthe) becomes a proposal, for any agent or tool, not only OpenClaw.
   "${{AS_AGENT[@]}}" mkdir -p "/Users/$AGENT_USER/.local/bin"
   "${{AS_AGENT[@]}}" ln -sf "$APP/venv/bin/git-remote-synthe" "/Users/$AGENT_USER/.local/bin/git-remote-synthe"
+  # The gateway (where the plugin acts) runs as the agent's account, started by launchd: nobody has to
+  # keep a window open. It restarts if it stops; its log is in the agent's home.
+  GW_PLIST=/Library/LaunchDaemons/com.synthe.openclaw-gateway.plist
+  cat > "$GW_PLIST" <<GWEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.synthe.openclaw-gateway</string>
+  <key>UserName</key><string>$AGENT_USER</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/$AGENT_USER/.local/bin/openclaw</string><string>gateway</string><string>run</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/$AGENT_USER</string>
+    <key>PATH</key><string>/Users/$AGENT_USER/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/$AGENT_USER</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/Users/$AGENT_USER/.openclaw/gateway.log</string>
+  <key>StandardOutPath</key><string>/Users/$AGENT_USER/.openclaw/gateway.log</string>
+</dict></plist>
+GWEOF
+  chown root:wheel "$GW_PLIST"
+  chmod 644 "$GW_PLIST"
+  plutil -lint "$GW_PLIST" >/dev/null
+  launchctl bootout system "$GW_PLIST" 2>/dev/null || true
+  launchctl bootstrap system "$GW_PLIST" \\
+    || echo "(couldn't start the gateway service; start it yourself: sudo -iu $AGENT_USER, then openclaw gateway run)"
   CLONE="/Users/$AGENT_USER/repo"
   # Through the broker: the agent's account has no GitHub credential, not even to read (private repos too).
   [ -d "$CLONE/.git" ] || "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-client" --broker {q(MACOS_SOCKET)} clone "$CLONE" >/dev/null \\
@@ -421,10 +450,9 @@ if [ "$SEPARATE" = 1 ]; then
   echo
   "${{AS_AGENT[@]}}" "$APP/venv/bin/synthe-init" doctor --repo "$CLONE" || true
   echo
-  echo "Last step, yours: give OpenClaw its model, then start it through its gateway (the plugin acts there):"
+  echo "Last step, yours: give OpenClaw its model. Its gateway (where the plugin acts) is already running."
   echo "  sudo -iu $AGENT_USER"
   echo '  export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && openclaw onboard'
-  echo "  openclaw gateway run      (leave it running; in another sudo -iu $AGENT_USER window:)"
   echo '  export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH" && cd ~/repo && openclaw tui'
 else
   echo
@@ -458,6 +486,66 @@ def apply_config(state: Path, stage: Path) -> dict:
     _write_private(state / "registry.json", json.dumps(registry, indent=2) + "\n")
     _write_private(cfg_path, json.dumps(cfg, indent=2) + "\n")
     return {"broker_kid": broker_pub["kid"], "workspace": cfg["workspace"], "remote": patch["remote"]["url"]}
+
+
+def apply_registry(state: Path, stage: Path) -> dict:
+    """Run as root by deploy/macos/upgrade.sh: install the staged registry (a new approval key, say)
+    without touching the broker's config. The broker's own entry always comes from its key file."""
+    key = json.loads((state / "keys" / f"{BROKER_ID}.key.json").read_text())
+    registry = json.loads((stage / "registry.json").read_text())
+    registry.setdefault("agents", {})[BROKER_ID] = {
+        "role": "commit broker", "kind": "service",
+        "keys": [{"kid": key["kid"], "alg": sc.ALG, "public_key": sc.b64u(sc.public_key(sc.unb64u(key["private_key"])))}]}
+    _write_private(state / "registry.json", json.dumps(registry, indent=2) + "\n")
+    return {"approval_keys": {n: [k.get("kid") for k in a.get("keys", [])] for n, a in registry["agents"].items()
+                              if a.get("kind") == "human"}}
+
+
+def add_approval_key(registry_path: Path, entry: dict) -> str:
+    """Append an approval key (e.g. Touch ID's ES256 key) to the one human approver's entry. Returns the
+    approver's id. The existing keys stay: the passphrase key is the fallback."""
+    registry = json.loads(registry_path.read_text())
+    humans = [n for n, a in (registry.get("agents") or {}).items() if (a or {}).get("kind") == "human"]
+    if len(humans) != 1:
+        raise SystemExit(f"{registry_path} has {len(humans)} human approvers; add the key by hand")
+    keys = registry["agents"][humans[0]].setdefault("keys", [])
+    if any(k.get("kid") == entry["kid"] for k in keys):
+        raise SystemExit(f"{registry_path} already has a key named {entry['kid']}")
+    keys.append(entry)
+    mode = registry_path.stat().st_mode & 0o777
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
+    os.chmod(registry_path, mode)
+    return humans[0]
+
+
+def touchid_setup(home: Path) -> int:
+    """Make a Touch ID approval key and register it next to the passphrase key."""
+    import synthe_touchid as st
+    ui = sui.UI()
+    print(ui.header("touch id"))
+    setup = read_setup(home)
+    reg = Path(setup.get("registry") or home / "broker" / "registry.json")
+    if not reg.is_file():
+        raise SystemExit(f"no registry at {reg}: run synthe-init setup first")
+    registry = json.loads(reg.read_text())
+    humans = [n for n, a in (registry.get("agents") or {}).items() if (a or {}).get("kind") == "human"]
+    if len(humans) != 1:
+        raise SystemExit(f"{reg} has {len(humans)} human approvers; this sets up one")
+    try:
+        entry = st.enroll(home, humans[0], source_root())
+    except st.TouchIDError as e:
+        raise SystemExit(f"Touch ID can't be set up: {e}")
+    add_approval_key(reg, entry)
+    print(ui.check("PASS", "touch id key", f"{entry['kid']}: made in this Mac's Secure Enclave; it signs only "
+                                          f"after a Touch ID check with today's fingerprints", 16))
+    print(ui.check("PASS", "registered", f"next to your passphrase key (the fallback) in {reg}", 16))
+    if setup.get("mode") == "macos-user":
+        print("\nOne admin step makes the broker accept it (it also updates the installed Synthe code):")
+        print(ui.cmd(f"sudo bash {source_root() / 'deploy' / 'macos' / 'upgrade.sh'}") if ui.color
+              else f"\n  sudo bash {source_root() / 'deploy' / 'macos' / 'upgrade.sh'}\n")
+    print("\nThen synthe-approve asks for your finger instead of your passphrase "
+          "(synthe-approve --passphrase still uses the passphrase key).")
+    return 0
 
 
 def wire_openclaw(oc: OpenClaw, home: Path, assume_yes: bool) -> list:
@@ -555,8 +643,9 @@ def openclaw_checks(oc: OpenClaw | None) -> list:
         add("PASS", "barrier plugin", "synthe-barrier is loaded and blocks direct pushes (before_tool_call)")
         # Seen live (2026-10-07): through the gateway it blocked every push; in `openclaw tui --local` /
         # `openclaw chat` (embedded) it never ran, and only the wall (no credential) stopped the pushes.
-        add("WARN", "barrier plugin mode", "it acts only through the OpenClaw gateway (openclaw gateway run, then "
-                                           "openclaw tui); `tui --local` and `chat` skip it, leaving only the wall")
+        add("WARN", "barrier plugin mode", "it acts only through the OpenClaw gateway (setup runs it as a service; "
+                                           "connect with openclaw tui); `tui --local` and `chat` skip it, "
+                                           "leaving only the wall")
     else:
         add("FAIL", "barrier plugin", f"synthe-barrier is not loaded and active (status {plugin.get('status')!r}); "
                                       f"run synthe-init setup again")
@@ -744,6 +833,11 @@ def main(argv=None) -> int:
     g.add_argument("--home", default="~/.synthe")
     g.add_argument("--agent", default="openclaw", help="the agent's id (the broker's receiver)")
     g.add_argument("--yes", action="store_true", help="install the OpenClaw plugin without OpenClaw asking you")
+    t = sub.add_parser("touchid", help="approve with Touch ID: make a Secure Enclave key and register it")
+    t.add_argument("--home", default="~/.synthe")
+    r = sub.add_parser("apply-registry", help=argparse.SUPPRESS)  # run by deploy/macos/upgrade.sh, as root
+    r.add_argument("--state", required=True)
+    r.add_argument("--stage", required=True)
     c = sub.add_parser("apply-config", help=argparse.SUPPRESS)  # run by enforce-macos.sh, as root
     c.add_argument("--state", required=True)
     c.add_argument("--stage", required=True)
@@ -757,6 +851,11 @@ def main(argv=None) -> int:
     if a.cmd == "apply-config":  # runs as root with no --home and no OpenClaw
         print(json.dumps(apply_config(Path(a.state), Path(a.stage)), indent=2))
         return 0
+    if a.cmd == "apply-registry":  # runs as root with no --home and no OpenClaw
+        print(json.dumps(apply_registry(Path(a.state), Path(a.stage)), indent=2))
+        return 0
+    if a.cmd == "touchid":
+        return touchid_setup(Path(a.home).expanduser())
     home = Path(a.home).expanduser()
     oc_bin = find_openclaw()
     oc = OpenClaw(oc_bin) if oc_bin else None

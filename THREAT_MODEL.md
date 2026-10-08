@@ -16,7 +16,7 @@ A signature proves **who said it**. It never proves **that it's safe**.
 | Asset | Where it lives | If it's compromised |
 |---|---|---|
 | Registry (agents, keys, receiver policy) | `registry.json` | **Root of trust.** Whoever can edit it decides who exists and what's allowed |
-| Human approver keys | key files (`chmod 600`) | Attacker can approve any gated action |
+| Human approver keys | passphrase-sealed file, or Secure Enclave with a 0600 public metadata/handle file | Attacker who can use one can approve any gated action |
 | Agent signing keys | key files; custodial in the lab | Attacker can send handoffs as that agent |
 | Ledger | `ledger.json` (Action: `actions/cache`) | Deleting or resetting it re-enables duplicates |
 | Workspace bytes | `--workspace` root | Pins detect changes; they can't stop a changed file being read later |
@@ -30,7 +30,7 @@ A signature proves **who said it**. It never proves **that it's safe**.
 | Agent spoofs another agent | key must be registered under `from` | `signature_invalid`, `signature_signer_mismatch` |
 | Sender grants itself tools or budget | receiver policy is a ceiling | `authority_exceeds_receiver_policy` |
 | Sender drops an approval requirement | policy's `approval_required_for` is unioned in | `approval_missing` |
-| Forged or typed-in approval | approvals must be signed by a trusted approver | `approval_unsigned`, `approver_not_trusted` |
+| Forged or typed-in approval | approvals must carry a valid Ed25519 or ES256 signature from a registered, trusted approver key | `approval_unsigned`, `approval_signature_invalid`, `approver_not_trusted` |
 | Approval replayed onto another handoff | signature binds `idempotency_key`, `from`, `to` | `approval_signature_invalid` |
 | Same work executed twice | ledger claim (RESERVED → COMPLETED, file lock) | `duplicate_idempotency_key`, `idempotency_key_reserved` |
 | Someone else closes your claim | completion bound to the packet digest + claim token (MCP) / connector identity (lab) | `completion_packet_mismatch`, `claim_token_invalid`, `claim_token_required` |
@@ -160,6 +160,29 @@ held to the same rules.
 
 Limit: the container is a wall only against users outside the `docker` group (see above).
 
+## v0.6: Touch ID approvals on macOS
+
+`synthe-init touchid` creates an ES256 (P-256) approval key in the Mac's Secure Enclave and registers
+its public half next to the existing passphrase-protected Ed25519 key. The private key is
+non-exportable and is released for signing only after a biometric check. The key uses
+`.biometryCurrentSet`, so enrolling or removing a fingerprint invalidates it instead of silently
+expanding who may approve. Packet and receipt signatures remain Ed25519.
+
+| Threat | Mechanism |
+|---|---|
+| Approval key copied from disk | only a public key and an opaque, device-bound Secure Enclave handle are stored; the private key is not exportable |
+| Agent labels one signature as another key or algorithm | the registry selects Ed25519 or ES256 by `kid`; algorithm confusion is refused, and `kid` is required when both approval keys are registered |
+| Agent forges what the biometric dialog appears to approve | the prompt is rendered from the broker's staged detail, with control characters removed; the signed bytes pin the action, target and commit |
+| Touch ID is cancelled, unavailable or returns malformed output | no approval is submitted and the proposal stays staged |
+| Fingerprint enrollment changes after key creation | `.biometryCurrentSet` invalidates the key; the operator must enroll a replacement and update the registry |
+
+Limits: Touch ID proves that the configured Mac authenticated an enrolled fingerprint; it does not
+prove that the diff is safe. A process running as the same desktop user can invoke the helper and
+choose prompt text, so the operator must first read the broker-derived terminal card and compare its
+branch, commit and files with the system prompt. The prompt cannot display the whole diff. Root or a
+compromised OS/UI remains outside this boundary. The `synthe-approve --passphrase` path deliberately
+keeps the sealed Ed25519 key as a recovery fallback. Details: [`docs/TOUCHID.md`](docs/TOUCHID.md).
+
 ## Out of scope: what it does NOT stop (be honest about these)
 
 1. **A compromised or prompt-injected sender.** It produces a perfectly valid,
@@ -178,12 +201,12 @@ Limit: the container is a wall only against users outside the `docker` group (se
    the sender's *estimates*, so a lying `est_usd` passes.
 4. **Whoever controls the registry.** It's an unsigned JSON file today. Signed
    registry is a Phase 2 item, and should come early.
-5. **Leaked keys.** There's no revocation yet. Rotate by adding a new `kid` and
-   removing the old one. Human keys in plaintext files are the weakest link: an agent running as the
-   same user can read one and approve its own work. Unreleased: approver keys can be sealed under a
-   passphrase (`synthe-sign keygen --encrypt`, `synthe-sign protect`; scrypt + AES-256-GCM), unlocked
-   only at a terminal; `synthe-approve` and `synthe-init` refuse plaintext approver keys. OS keychain
-   and passkeys/WebAuthn later.
+5. **Leaked or usable keys.** There's no revocation yet. Rotate by adding a new `kid` and removing the
+   old one. Approver keys can be sealed under a passphrase (`synthe-sign keygen --encrypt`,
+   `synthe-sign protect`; scrypt + AES-256-GCM), unlocked only at a terminal; `synthe-approve` and
+   `synthe-init` refuse plaintext approver keys. On supported Macs, Touch ID keeps an ES256 approval
+   key in the Secure Enclave, but a compromised same-user process can still cause a biometric prompt.
+   Neither path makes an approval safe if the person approves malicious content.
 6. **Truth.** A hash proves the bytes, not that they're correct.
 7. **Meaningless content.** The checker validates structure. A packet whose
    `purpose` is `"<one sentence>"` is structurally valid. (The lab refuses unfilled
