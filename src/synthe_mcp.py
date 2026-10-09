@@ -481,8 +481,13 @@ def main(argv=None):
     ap.add_argument("--allowed-origin", action="append", default=[],
                     help="browser Origin allowed to call the HTTP endpoint (repeatable)")
     a = ap.parse_args(argv)
-    if a.broker_url:
-        server = SyntheServer(None, None, None, broker_url=a.broker_url, as_receiver=a.as_receiver)
+    broker_url = (a.broker_url or "").strip()
+    if not broker_url or broker_url == "${SYNTHE_BROKER}":
+        import synthe_client as scl
+        broker_url = os.environ.get("SYNTHE_BROKER", "").strip() or (scl.configured_broker() or "")
+
+    if broker_url:
+        server = SyntheServer(None, None, None, broker_url=broker_url, as_receiver=a.as_receiver)
     else:
         if a.broker:
             import synthe_commit as cm

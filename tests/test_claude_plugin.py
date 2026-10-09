@@ -59,3 +59,20 @@ def test_plugin_layout_and_broker_only_mcp():
     config = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"][0]
     assert "Bash" in config["matcher"] and "synthe_submit_approval" in config["matcher"]
     assert "${CLAUDE_PLUGIN_ROOT}/hooks/pre_tool_use.py" in config["hooks"][0]["command"]
+
+
+def test_mcp_broker_url_fallback(monkeypatch, tmp_path):
+    import synthe_mcp as sm
+    sock = tmp_path / "broker.sock"
+    sock.touch()
+    monkeypatch.setenv("SYNTHE_BROKER", f"unix://{sock}")
+    for arg in ["", "${SYNTHE_BROKER}"]:
+        called = {}
+        def mock_server(registry, ledger, workspace, reserve_ttl_hours=24.0, verify_evidence=False,
+                        broker_config=None, broker_url=None, as_receiver=None):
+            called["broker_url"] = broker_url
+            return object()
+        monkeypatch.setattr(sm, "SyntheServer", mock_server)
+        monkeypatch.setattr(sm, "serve_stdio", lambda s: None)
+        assert sm.main(["--broker-url", arg]) == 0
+        assert called["broker_url"] == f"unix://{sock}"

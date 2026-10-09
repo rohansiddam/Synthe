@@ -86,13 +86,22 @@ def peer_creds(sock) -> dict | None:
 def configured_broker() -> str | None:
     """The broker address `synthe-init` wrote to ~/.synthe/setup.json, for an agent shell that never set
     SYNTHE_BROKER (a clean-Mac run: OpenClaw's exec tool doesn't load the user's profile, so
-    `synthe-client sync` failed with broker_unset). It only says where to connect; the broker's uid is
-    still checked when SYNTHE_BROKER_UID or a clone's pin asks for it."""
+    `synthe-client sync` failed with broker_unset). If setup.json doesn't specify one, checks standard
+    daemon sockets."""
     try:
         broker = json.loads((Path.home() / ".synthe" / "setup.json").read_text()).get("broker")
+        if isinstance(broker, str) and broker.strip():
+            return broker.strip()
     except (OSError, ValueError, AttributeError):
-        return None
-    return broker if isinstance(broker, str) else None   # BrokerClient refuses anything not unix:// or tcp://
+        pass
+    for candidate in (
+        Path("/var/db/synthe-run/broker.sock"),
+        Path("/run/synthe/broker.sock"),
+        Path.home() / ".synthe" / "broker.sock",
+    ):
+        if candidate.exists():
+            return f"unix://{candidate}"
+    return None
 
 
 class BrokerClient:
