@@ -3,8 +3,8 @@
 """Lane grants from your own terminal, in one command (behind `synthe-task grant|grants|revoke-grant`).
 
   synthe-task grant [--branch 'agent/*'] [--paths 'src/**,tests/**'] [--uses 50] [--until 7d]
-                    [--auto-approve routine,review] [--remote origin] [--agent openclaw] [--delegate ID]
-                    [--brief TEXT] [--passphrase]
+                    [--auto-approve routine,review] [--self-issue] [--remote origin] [--agent openclaw]
+                    [--delegate ID] [--brief TEXT] [--passphrase]
   synthe-task grants [--all]
   synthe-task revoke-grant ID
 
@@ -21,6 +21,12 @@ By default a lane has no use limit and no expiry: it stays open until you revoke
 pushes on its own (`auto_approve`, the broker's default; --auto-approve routine,review,high overrides it):
 a high-risk push, and a push that touches files outside the lane's paths, wait for you. What a lane never
 covers are the stops: main, master and patterns that reach them, and the policy's forbidden paths.
+
+With --self-issue (on for the lane setup offers) the agent may also start its own work inside the lane: a
+plain `git push` on a lane branch with no task from you gets a task the broker issues under the grant, signed
+by its own task issuer key and labelled everywhere as written by the agent (SPEC section 16). There is no
+limit on how many unless the grant names one; revoking or expiring the grant kills every such task that hasn't
+landed. In v1 such a lane must send high-risk pushes to you (no "high" in --auto-approve) or name a reviewer.
 
 Only you can run it: it needs a terminal you are typing in, and the signature needs your passphrase or
 your finger. There is no --yes. An unattended lane trades review for speed within its limits: while it
@@ -250,6 +256,12 @@ def summary(body: dict, policy: dict | None = None, tz=None, rules: dict | None 
     lines = [f"Agent {body['receiver']} may push to {where} changing {_join(body['path_scope'])}, {limit}, "
              + ("with no expiry." if no_expiry(until) else f"until {_local(until, tz)}."),
              "Pushes to other branches still ask you. " + interrupts(body, rules)]
+    if "self_issue" in body:
+        lines.append("The agent may also start its own work in the lane: a plain git push on these branches with no "
+                     "task from you gets a task Synthe issues under this grant, labelled as written by the agent. "
+                     + ("There is no limit on how many. " if not any(k in body["self_issue"] for k in
+                                                                     ("max_tasks", "max_open", "max_per_hour"))
+                        else "") + "Revoking the grant stops them.")
     if "delegate" in body:
         lines.append(f"Each push in the lane is reviewed by {body['delegate']} instead of you; it can send a push "
                      f"back to you. It may approve what a fooled reviewer would: the limits above are the bound.")
@@ -270,11 +282,14 @@ def summary(body: dict, policy: dict | None = None, tz=None, rules: dict | None 
 def plan(s: dict, *, client, branch: str, paths: list, uses: int | None = None, until: str | None = None,
          remote: str = "origin", auto_approve=None,
          receiver: str | None = None, delegate: str | None = None, brief: str | None = None,
-         now: dt.datetime | None = None, template_id: str | None = None, tz=None) -> tuple[dict, str]:
+         now: dt.datetime | None = None, template_id: str | None = None, tz=None,
+         self_issue=False) -> tuple[dict, str]:
     """The unsigned grant and its summary, after every check that can be made before you sign. `s` is
     synthe_task.setup_of(home). The broker supplies the lineage digests (op lane_template_draft) and, when
     `auto_approve` (the risk tiers the lane approves on its own) is not given, the tiers a new grant carries.
-    No `uses` / `until` means the grant carries no `max_uses` / `expires_at`: that limit does not exist."""
+    No `uses` / `until` means the grant carries no `max_uses` / `expires_at`: that limit does not exist.
+    `self_issue` (v0.7): True adds `self_issue` (the agent may start its own tasks in the lane), naming the
+    broker's task issuer; "if-available" does the same when the broker has an issuer and the tiers allow it."""
     now = (now or dt.datetime.now(dt.timezone.utc)).replace(microsecond=0)
     receiver = receiver or s["receiver"]
     if receiver != s["receiver"]:
@@ -317,6 +332,17 @@ def plan(s: dict, *, client, branch: str, paths: list, uses: int | None = None, 
         body["auto_approve"], body["lineage"] = tiers, draft["lineage"]
     except scl.BrokerError as e:
         raise SystemExit(f"the broker can't prepare a grant: {e.code}: {e.message}")
+    if self_issue:
+        issuer = (draft.get("self_issue_default") or {}).get("issuer")
+        reviewed = bool(delegate) or "high" not in tiers
+        if issuer and reviewed:
+            body["self_issue"] = {"issuer": issuer}
+        elif self_issue is True and not issuer:
+            raise SystemExit("--self-issue: this broker holds no task issuer key (set up before v0.7); re-run the "
+                             "admin step to add one, or leave --self-issue out")
+        elif self_issue is True:
+            raise SystemExit("--self-issue: a lane where the agent starts its own work must send high-risk pushes to "
+                             "you: leave 'high' out of --auto-approve, or name a reviewer with --delegate")
     return body, summary(body, s["policy"], tz, draft.get("risk_rules"))
 
 
@@ -402,6 +428,8 @@ def renew_command(t: dict) -> str:
         cmd += ["--auto-approve", ",".join(t["auto_approve"])]
     if t["params"]["remote"] != "origin":
         cmd += ["--remote", t["params"]["remote"]]
+    if t.get("self_issue"):
+        cmd += ["--self-issue"]
     if t.get("delegate"):
         cmd += ["--delegate", t["delegate"]]
     if t.get("brief") and len(t["brief"]) <= 200:
@@ -432,8 +460,9 @@ def alone(t: dict) -> str:
         return "not risk-aware: every kind of push goes out, high-risk ones too; pushes outside its paths ask you"
     left = [TIER_NAMES.get(x, str(x)) for x in synthe_risk.TIERS if x not in t["auto_approve"]]
     ask = (_join(left) + " pushes and ") if left else ""
+    own = "; the agent may start its own tasks in it" if t.get("self_issue") else ""
     return (f"goes out on its own: {_join([TIER_NAMES.get(x, str(x)) for x in t['auto_approve']])}; "
-            f"{ask}pushes outside its paths ask you")
+            f"{ask}pushes outside its paths ask you{own}")
 
 
 def render_grants(rows: list, show_all: bool = False, ui=None, tz=None) -> str:
@@ -490,7 +519,8 @@ def revoke(client, home: Path, grant_id: str, key=None, passphrase: bool = False
 
 QUESTION = """How hands-off?
   [1] Ask me before every push
-  [2] Agents push without asking; Synthe only interrupts for what it blocks or flags as high-risk (recommended)"""
+  [2] Agents push without asking; Synthe only interrupts for what it blocks or flags as high-risk (recommended)
+      With [2] the agent can also start its own work in the lane: a plain git push needs no task from you."""
 
 
 def _connect(broker: str, tries: int, sleep):
@@ -513,7 +543,8 @@ def offer_lane(home: Path, *, interactive: bool | None = None, ask=input, out=pr
     At a terminal, Return alone picks [2], the recommended choice; it still shows the terms and asks before
     anything is signed. Option 2 is the same code as `synthe-task grant` with the defaults from your setup:
     its branches and allowed paths, the broker's default risk tiers (routine and review go out alone, high-risk
-    and out-of-path pushes ask you), no use limit, no expiry (until you revoke it)."""
+    and out-of-path pushes ask you), no use limit, no expiry (until you revoke it), and self-issue (the agent may
+    start its own tasks in the lane) when the broker has a task issuer."""
     if interactive is None:
         interactive = _terminal()
     later = "Open a lane any time: synthe-task grant"
@@ -535,7 +566,7 @@ def offer_lane(home: Path, *, interactive: bool | None = None, ask=input, out=pr
         made = 0
         for pattern in s["remote"].get("branches") or []:
             made += bool(issue(home, client=client, key=key, confirm=confirm, out=out, branch=pattern,
-                               paths=list(s["policy"].get("allowed_paths") or []),
+                               paths=list(s["policy"].get("allowed_paths") or []), self_issue="if-available",
                                question="Sign it with your key? [Y/n] "))
     except (SystemExit, scl.BrokerError) as e:
         out(f"Couldn't open a lane: {e}\nEvery push will ask you. {later}")
@@ -554,6 +585,9 @@ def add_parsers(sub) -> None:
                    " review, high (default: the broker's, routine,review: high-risk pushes still ask you)")
     g.add_argument("--until", help="cap how long it stays open: 90m, 12h, 7d, 2w, or a date (default: no expiry; "
                                    "it stays open until you revoke it)")
+    g.add_argument("--self-issue", action="store_true",
+                   help="let the agent start its own work in the lane: a plain git push with no task from you gets a "
+                        "task the broker issues under this grant (no limit on how many)")
     g.add_argument("--remote", default="origin")
     g.add_argument("--agent", help="the agent this applies to (default: the one in your setup)")
     g.add_argument("--delegate", help="a registered model approver that reviews each push instead of you")
@@ -592,7 +626,7 @@ def run(a) -> int:
         issue(home, client=client, passphrase=a.passphrase, branch=patterns[0],
               paths=_csv(a.paths) if a.paths else list(s["policy"].get("allowed_paths") or []), uses=a.uses,
               until=a.until, remote=a.remote, receiver=a.agent, delegate=a.delegate, brief=a.brief,
-              auto_approve=a.auto_approve)
+              auto_approve=a.auto_approve, self_issue=a.self_issue)
     except scl.BrokerError as e:
         raise SystemExit(f"synthe-task: {e.code}: {e.message}")
     return 0

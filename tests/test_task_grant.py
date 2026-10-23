@@ -617,6 +617,8 @@ def test_the_autonomous_lane_is_the_recommended_default_at_a_terminal(live, answ
     assert (g["status"], g["path_scope"], g["params"]["branch_pattern"]) == ("active", PATHS, "agent/*")
     assert "max_uses" not in g and "expires_at" not in g and g["hints"] == []         # no limits are signed, none exist
     assert g["auto_approve"] == ["routine", "review"]                # the broker's default: high-risk still asks
+    assert g["self_issue"] == {"issuer": "synthe-issuer"}            # the agent may start its own tasks in it
+    assert any("start its own work in the lane" in x and "no limit on how many" in x for x in lines)
     assert asked == ["Sign it with your key? [Y/n] "]                # it still shows the terms and asks
     assert any("with no limit on pushes, with no expiry" in x and "standing permission" in x for x in lines)
     assert any("High-risk pushes (CI workflows" in x and "outside these paths still ask you" in x for x in lines)
@@ -658,7 +660,8 @@ def test_finish_setup_ends_with_the_question(tmp_path, monkeypatch):
 
 def test_setup_switches_lane_grants_on_for_the_agent_in_both_modes(lane, tmp_path):
     cfg = json.loads((lane["home"] / "broker" / "broker.json").read_text())
-    assert cfg["lane_templates"] == {"receivers": ["openclaw"]}
+    issuer = {"issuer": "synthe-issuer", "key_file": "keys/synthe-issuer.key.json"}   # v0.7: who signs issued tasks
+    assert cfg["lane_templates"] == {"receivers": ["openclaw"], "self_issue": issuer}
     state = tmp_path / "state"
     (state / "keys").mkdir(parents=True)
     (state / "keys" / "synthe-broker.key.json").write_text(json.dumps(
@@ -670,9 +673,52 @@ def test_setup_switches_lane_grants_on_for_the_agent_in_both_modes(lane, tmp_pat
     (stage / "config-patch.json").write_text(json.dumps({"workspace": "/w", "receiver": "openclaw",
                                                          "remote": {"url": "u", "branches": ["agent/*"]}}))
     si.apply_config(state, stage)
+    # a broker installed before the task issuer key existed: lanes on, self-issue off (nothing to sign with)
     assert json.loads((state / "broker.json").read_text())["lane_templates"] == {"receivers": ["openclaw"]}
+    (state / "keys" / "synthe-issuer.key.json").write_text(json.dumps(
+        {"agent": "synthe-issuer", "kid": "i-1", "alg": "Ed25519", "private_key": "B" * 43}))
+    si.apply_config(state, stage)
+    assert json.loads((state / "broker.json").read_text())["lane_templates"] == {"receivers": ["openclaw"],
+                                                                                 "self_issue": issuer}
+    assert json.loads((state / "registry.json").read_text())["agents"]["synthe-issuer"]["kind"] == "task_issuer"
     cfg = json.loads((state / "broker.json").read_text())
     cfg["lane_templates"] = {"receivers": ["openclaw", "other"]}        # an operator's own choice survives a re-apply
     (state / "broker.json").write_text(json.dumps(cfg))
     si.apply_config(state, stage)
     assert json.loads((state / "broker.json").read_text())["lane_templates"]["receivers"] == ["openclaw", "other"]
+
+
+
+# ---- --self-issue: the agent may start its own work in the lane (v0.7) --------------------------------------
+
+def test_self_issue_names_the_brokers_issuer_and_says_so(live):
+    body, text = sg.plan(st.setup_of(live["home"]), client=live["client"], self_issue=True, **spec(uses=None, until=None))
+    assert body["self_issue"] == {"issuer": "synthe-issuer"} and body["auto_approve"] == ["routine", "review"]
+    assert "a plain git push on these branches with no task from you gets a task Synthe issues" in text
+    assert "There is no limit on how many." in text and "Revoking the grant stops them." in text
+    assert "self_issue" not in sg.plan(st.setup_of(live["home"]), client=live["client"], **spec())[0]   # off by default
+    assert sg.renew_command({**body, "max_uses": None}).endswith(" --self-issue")
+    assert sg.alone({**body}).endswith("the agent may start its own tasks in it")
+    open_lane(live, self_issue=True, uses=None, until=None)
+    [g] = sg.list_grants(live["client"])
+    assert g["self_issue"] == {"issuer": "synthe-issuer"} and g["status"] == "active"
+
+
+def test_self_issue_refuses_a_lane_that_would_let_high_risk_pushes_go_alone(live):
+    with pytest.raises(SystemExit, match="must send high-risk pushes to you"):
+        sg.plan(st.setup_of(live["home"]), client=live["client"], self_issue=True, auto_approve="routine,review,high",
+                **spec())
+    # the setup offer asks for it only if it can have it: then the lane simply has no self-issue
+    body, _ = sg.plan(st.setup_of(live["home"]), client=live["client"], self_issue="if-available",
+                      auto_approve="routine,review,high", **spec())
+    assert "self_issue" not in body
+
+
+def test_self_issue_on_a_broker_without_an_issuer_says_how_to_get_one(live, monkeypatch):
+    real = live["client"].call
+    monkeypatch.setattr(live["client"], "call", lambda op, **kw: {**real(op, **kw), "self_issue_default": None}
+                        if op == "lane_template_draft" else real(op, **kw))
+    with pytest.raises(SystemExit, match="holds no task issuer key"):
+        sg.plan(st.setup_of(live["home"]), client=live["client"], self_issue=True, **spec())
+    assert "self_issue" not in sg.plan(st.setup_of(live["home"]), client=live["client"], self_issue="if-available",
+                                       **spec())[0]

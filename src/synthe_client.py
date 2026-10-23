@@ -226,6 +226,23 @@ def push(client: BrokerClient, packet: dict, claim_token: str, action: str, remo
                        bundle=base64.b64encode(bundle).decode("ascii"), **extra)
 
 
+def start_task(client: BrokerClient, branch: str, purpose: str, owned_paths=None, depends_on=None,
+               request_id: str | None = None) -> dict:
+    """(v0.7) Start a task of your own inside a lane that allows it, before working: the broker issues it under
+    the human's grant (signed by its task issuer key, receipted) and claims it, so exclusive paths and
+    depends_on work ahead. Returns the broker's answer: decision task_issued with `packet` and `claim`
+    (keep both, and propose the push with them), or task_issue_refused with reasons. Reusing a request_id
+    returns the same task; a fresh one is made when none is given."""
+    import secrets
+    args = {"request_id": request_id or "r-" + secrets.token_hex(12), "branch": branch, "purpose": purpose,
+            "claim": True}
+    if owned_paths:
+        args["owned_paths"] = list(owned_paths)
+    if depends_on:
+        args["depends_on"] = list(depends_on)
+    return client.call("issue_task", **args)
+
+
 def propose_from_args(client: BrokerClient, args: dict) -> dict:
     """MCP synthe_propose_effect in client mode: `source` is the agent's repo
     (read here, on the agent's side); the broker gets a bundle."""
@@ -451,6 +468,14 @@ def main(argv=None) -> int:
     p.add_argument("--wait-for-approval", action="store_true",
                    help="if only the approval (or an upstream) is missing, stage it; the broker commits "
                         "it when covered")
+    sta = sub.add_parser("start", help="start a task of your own inside a lane that allows it (v0.7): issued, "
+                                       "claimed, and saved for the push")
+    sta.add_argument("--branch", required=True)
+    sta.add_argument("--purpose", required=True, help="one line: what this work is (shown as written by you)")
+    sta.add_argument("--paths", help="comma-separated globs it will touch (default: the lane's paths)")
+    sta.add_argument("--depends-on", action="append", help="an upstream task's idempotency key (repeatable)")
+    sta.add_argument("--request-id", help="reuse to get the same task back after a lost answer")
+    sta.add_argument("--save", help="write the packet here (the claim token goes next to it, 0600)")
     ap_ = sub.add_parser("approve-submit", help="deliver a detached approval (synthe_sign.py approve --detached)")
     ap_.add_argument("approval")
     st = sub.add_parser("staged", help="proposals the broker holds until their approval or upstream arrives")
@@ -487,6 +512,16 @@ def main(argv=None) -> int:
         elif a.cmd == "push":
             out = push(client, _load(a.packet), _claim_token(a), a.action, a.remote, a.branch, a.repo,
                        a.commit, a.expected_old, a.base, wait_for_approval=a.wait_for_approval)
+        elif a.cmd == "start":
+            paths = [x.strip() for x in a.paths.split(",") if x.strip()] if a.paths else None
+            out = start_task(client, a.branch, a.purpose, paths, a.depends_on, a.request_id)
+            if a.save and out.get("decision") == "task_issued":
+                Path(a.save).write_text(json.dumps(out["packet"], indent=2) + "\n")
+                claim = (out.get("claim") or {}).get("claim")
+                if claim:
+                    fd = os.open(a.save + ".claim.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(claim, fh)
         elif a.cmd == "approve-submit":
             out = client.call("submit_approval", approval=_load(a.approval))
         elif a.cmd == "staged":
@@ -514,6 +549,8 @@ def main(argv=None) -> int:
         return {"executed": 0, "staged": 3}.get(out.get("decision"), 2)
     if a.cmd == "approve-submit":
         return 0 if (out.get("receipt") or {}).get("decision") == "approval_accepted" else 2
+    if a.cmd == "start":
+        return 0 if out.get("decision") == "task_issued" and (out.get("claim") or {}).get("decision") == "ACCEPT" else 2
     if a.cmd in ("claim", "complete"):
         return 0 if out.get("decision") in ("ACCEPT", "COMPLETED") else 2
     return 0

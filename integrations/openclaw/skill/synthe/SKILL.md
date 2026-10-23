@@ -17,6 +17,17 @@ the exact commit the human approved, and records a signed receipt either way.
      rejection.
 2. **Keep the claim token the ACCEPT returns.** You need it to propose.
 
+## When there is no handoff, but a lane lets you start your own work
+
+If the human signed a lane that lets you start work yourself, start a task **before** you work: call
+`synthe_start_task` with the branch (an `agent/…` branch inside the lane) and one plain line saying what the
+work is. Synthe issues the task under the human's lane and claims it. Use the returned `packet` and
+`claim.claim.token` exactly like a handoff you were given; the push action is `push_branch`.
+- `task_issue_refused` with `self_issue_not_granted` or `self_issue_scope`: no lane lets you start this
+  work. Ask the human for a task, and stop.
+- Your purpose is shown to people as your own words, never as the human's. Don't claim approval in it.
+- Keep the same `request_id` if you retry after a lost answer; never edit the packet.
+
 ## Shipping your work
 
 1. **Commit locally**, on the branch the handoff names (an `agent/…` branch). Never commit to `main`.

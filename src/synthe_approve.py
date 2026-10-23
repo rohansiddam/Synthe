@@ -113,8 +113,10 @@ def _paint(lines: list, ui) -> list:
                 or line.startswith(" Why this is flagged") or line.startswith("   • ") \
                 or line.startswith(" Outside your lane") or line.startswith(" Your lane sent this"):
             out.append(ui.c(line, "warn", bold=line.startswith(" High-risk")))
-        elif line.startswith(" The agent says"):
+        elif line.startswith(" The agent says") or line.startswith(" Task written by the agent"):
             out.append(ui.c(line, "warn", bold=True))
+        elif line.startswith(" Task signed by") or line.startswith(" Your instructions for this lane"):
+            out.append(ui.c(line, "brand", bold=True))
         elif line.startswith(" Diff"):
             in_diff = True
             out.append(ui.c(line, "brand", bold=True))
@@ -226,9 +228,23 @@ def render(detail: dict, full: bool = False, ui=None) -> str:
         if ch.get("patch_truncated"):
             lines.append("   … the broker cut the patch at its size limit; read the commit itself before approving")
         lines.append("─" * 72)
-    # The agent's words come last: read the change first, then what the agent says about it.
-    lines.append(" The agent says (its own words, not verified by Synthe):")
-    lines += [f"   {line}" for line in clean((detail.get("agent_says") or {}).get("purpose")).splitlines() or [""]]
+    # The task's words come last: read the change first, then what the task says. Its heading says who wrote it,
+    # from the broker's task_origin (the signed packet and the registry), never from the text itself.
+    origin = detail.get("task_origin") if isinstance(detail.get("task_origin"), dict) else {}
+    said = clean((detail.get("agent_says") or {}).get("purpose")).splitlines() or [""]
+    if origin.get("kind") == "self_issued":
+        lines.append(f" Task written by the agent (self-issued under lane {clean(origin.get('template_id'), True)}, "
+                     f"signed by {clean(origin.get('granted_by'), True)}, task {clean(origin.get('issue'), True)}):")
+        lines += [f"   {line}" for line in said]
+        if isinstance(detail.get("lane_brief"), str):
+            lines.append(" Your instructions for this lane (you signed these):")
+            lines += [f"   {line}" for line in clean(detail["lane_brief"]).splitlines() or [""]]
+    elif origin.get("kind") == "signed" and origin.get("sender_kind") == "human":
+        lines.append(f" Task signed by {clean(origin.get('sender'), True)} (a person, not the agent):")
+        lines += [f"   {line}" for line in said]
+    else:
+        lines.append(" The agent says (its own words, not verified by Synthe):")
+        lines += [f"   {line}" for line in said]
     lines.append("─" * 72)
     return "\n".join(_paint(lines, ui))
 

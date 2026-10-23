@@ -144,6 +144,30 @@ PROPOSE_TOOL = {
 }
 
 
+START_TASK_TOOL = {
+    "name": "synthe_start_task",
+    "title": "Start a task of your own inside a lane",
+    "description": "When no signed task covers the work and the human signed a lane that lets you start your own "
+                   "(self-issue), call this BEFORE working: Synthe issues a task under the human's grant for this "
+                   "branch, signed by its own task issuer key, receipts it and claims it. Use the returned `packet` "
+                   "and `claim.claim.token` exactly like a handoff you were given: work, then synthe_propose_effect "
+                   "with action 'push_branch'. `purpose` is one plain line saying what the work is; it is shown to "
+                   "people as written by you, never as the human's. task_issue_refused means no lane lets you start "
+                   "this work: report the reason codes and stop. Retrying with the same request_id returns the same "
+                   "task; never edit the packet.",
+    "inputSchema": {"type": "object", "properties": {
+        "branch": {"type": "string", "description": "the branch you will push, inside the lane (e.g. agent/feature-x)"},
+        "purpose": {"type": "string", "description": "one line: what this work is"},
+        "owned_paths": {"type": "array", "items": {"type": "string"},
+                        "description": "globs you will touch, inside the lane (default: the lane's paths)"},
+        "depends_on": {"type": "array", "items": {"type": "string"},
+                       "description": "idempotency keys of upstream tasks that must complete first"},
+        "request_id": {"type": "string", "description": "reuse after a lost answer to get the same task back"}},
+        "required": ["branch", "purpose"], "additionalProperties": False},
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+
 SUBMIT_APPROVAL_TOOL = {
     "name": "synthe_submit_approval",
     "title": "Deliver a human's signed approval",
@@ -287,7 +311,8 @@ class SyntheServer:
 
     def tools(self):
         """Tool definitions advertised by tools/list (subclasses may extend)."""
-        return TOOLS + ([PROPOSE_TOOL, SUBMIT_APPROVAL_TOOL, *READ_TOOLS] if self.broker or self.client else [])
+        return TOOLS + ([PROPOSE_TOOL, START_TASK_TOOL, SUBMIT_APPROVAL_TOOL, *READ_TOOLS]
+                        if self.broker or self.client else [])
 
     def tool_functions(self):
         """Tool name -> handler (subclasses may extend)."""
@@ -296,6 +321,7 @@ class SyntheServer:
                "synthe_receiver_policy": self.tool_policy}
         if self.broker or self.client:
             fns["synthe_propose_effect"] = self.tool_propose
+            fns["synthe_start_task"] = self.tool_start_task
             fns["synthe_submit_approval"] = self.tool_submit_approval
             fns["synthe_read_file"] = self.tool_read_file
             fns["synthe_list_files"] = self.tool_list_files
@@ -324,6 +350,27 @@ class SyntheServer:
             return self._via_broker("submit_approval", approval=args.get("approval"))
         import synthe_commit as cm
         return cm.submit_approval(self.broker, args.get("approval"))
+
+    def tool_start_task(self, args):
+        """(v0.7) Issue and claim a task under a lane that allows self-issue."""
+        if self.client:
+            import synthe_client as scl
+            try:
+                return scl.start_task(self.client, args.get("branch"), args.get("purpose"), args.get("owned_paths"),
+                                      args.get("depends_on"), args.get("request_id"))
+            except scl.BrokerError as exc:
+                return {"decision": "ERROR", "error": {"code": exc.code, "message": exc.message}}
+        import synthe_commit as cm
+        req = {k: args.get(k) for k in ("branch", "purpose", "owned_paths", "depends_on") if args.get(k) is not None}
+        import secrets
+        req["request_id"] = args.get("request_id") or "r-" + secrets.token_hex(12)
+        try:
+            out = cm.issue_task(self.broker, req)
+        except cm.Deny as d:
+            return {"decision": "ERROR", "error": {"code": d.reason["code"], "message": d.reason["message"]}}
+        if out.get("decision") == "task_issued":
+            out["claim"] = self.tool_validate({"packet": out["packet"], "wait_for_approval": True})
+        return out
 
     def tool_propose(self, args):
         if self.client:
