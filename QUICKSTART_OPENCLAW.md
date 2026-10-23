@@ -1,16 +1,25 @@
-# Quickstart: your first approved push (macOS, OpenClaw)
+# Quickstart: install Synthe, then just work (macOS, OpenClaw)
 
-You start with a Mac and a GitHub repo. You finish with one commit that an OpenClaw agent wrote, you
-read and approved, and Synthe pushed to GitHub.
+You start with a Mac and a GitHub repo. You finish with an OpenClaw agent that pushes its work to
+GitHub on its own, inside a lane you signed once. You hear from Synthe only when it stops something
+or needs you, and it tells you why that mattered.
 
 How it works:
 - The agent runs in its own Mac account (`openclaw`) and has no GitHub login.
-- A hidden `_synthe` user holds the only GitHub token.
-- Synthe pushes only a commit you approved, and writes a signed receipt for it.
+- A hidden `_synthe` user holds the only GitHub token, and pushes only what a lane or task you signed
+  allows.
+- Inside your lane, routine pushes go out without asking you. High-risk pushes (CI workflows,
+  secret-like files, very large diffs or deletions) and pushes outside the lane's files wait for you.
+- Every push, and every refusal, gets a signed receipt. `synthe-notify` reads them and tells you only
+  what is worth your attention.
 
-macOS on Apple silicon is the verified platform. These steps match what was run on 2026-10-07
-([`docs/OPENCLAW_RESULTS.md`](docs/OPENCLAW_RESULTS.md)), but nobody has timed them with a new user
-yet. Not on a Mac, or not using OpenClaw? See [`docs/ANY_AGENT.md`](docs/ANY_AGENT.md).
+The happy path is: **install → setup (say yes to the lane and to notifications) → give the agent work
+→ hear from Synthe only when it matters → read the weekly digest.**
+
+macOS on Apple silicon is the verified platform. Steps 1 to 6 match what was run on 2026-10-07
+([`docs/OPENCLAW_RESULTS.md`](docs/OPENCLAW_RESULTS.md)); the lane and notification questions at
+the end of setup are newer and nobody has timed the whole path with a new user yet. Not on a Mac, or
+not using OpenClaw? See [`docs/ANY_AGENT.md`](docs/ANY_AGENT.md).
 
 ## Before you start
 
@@ -95,14 +104,15 @@ bash /Users/<you>/.synthe/finish-setup.sh
 If it says `can't prepare yet:` instead, fix each item it lists (for example `brew install node`) and
 run the line again.
 
-## 5. Finish setup (you type the secrets)
+## 5. Finish setup (you type the secrets, then answer two questions)
 
 ```bash
 bash ~/.synthe/finish-setup.sh
 ```
 
 It asks for three things, in this order:
-1. a new **approval passphrase**, twice. Pick a new one and remember it: it signs every approval.
+1. a new **approval passphrase**, twice. Pick a new one and remember it: it signs your lane, your
+   tasks and any push you approve.
 2. your **GitHub token**. Paste it; nothing shows as you paste.
 3. your **Mac password**, once, for the admin step.
 
@@ -112,25 +122,56 @@ Then it does the rest by itself:
 - installs OpenClaw in the agent's account, with the Synthe plugin, skill and gateway;
 - clones your repo there through the broker, so the agent's account needs no GitHub access, not
   even to read;
-- runs the doctor;
-- last, asks **How hands-off?** (see below).
+- runs the doctor.
 
-**You should see:** the doctor's report near the end, with the level **ENFORCED**, every check `PASS`
-except one expected `WARN` for barrier plugin mode (it notes that `tui --local` skips the plugin). Its last lines suggest OpenClaw's setup wizard; skip that and use step 6.
+**You should see:** the doctor's report, with the level **ENFORCED**, every check `PASS` except one
+expected `WARN` for barrier plugin mode (it notes that `tui --local` skips the plugin). Its last lines
+suggest OpenClaw's setup wizard; skip that and use step 6.
 
 If the level isn't ENFORCED, stop here: the failing check says what's wrong.
 
-**How hands-off?** The last question of setup:
+### Question 1: how hands-off?
 
 ```
-[1] Ask me before every push
-[2] Agents push without asking; Synthe only interrupts for what it blocks or flags as high-risk (recommended)
+How hands-off?
+  [1] Ask me before every push
+  [2] Agents push without asking; Synthe only interrupts for what it blocks or flags as high-risk (recommended)
 ```
 
-Return takes `[2]`. It then shows what it will sign (the agent, the branches, the files, "no limit on
-pushes, no expiry") and asks once more before it asks for your passphrase. Choose `[1]` and this
-quickstart works exactly as written: you approve every push in step 8. A run with no one at the
-keyboard never picks `[2]` for you. You can change your mind any time: see **Next**.
+Press Return for `[2]`. Before anything is signed it shows the lane in plain words, roughly:
+
+> Agent openclaw may push to agent/* changing src/\*\*, with no limit on pushes, with no expiry.
+> Pushes to other branches still ask you. High-risk pushes (CI workflows, key and secret files, 400+
+> changed lines, mass deletions, 30+ commits, per the broker's rules) and pushes outside these paths
+> still ask you. The risk check reads paths and sizes, not code. Review-level changes (dependency
+> manifests and lockfiles, Dockerfiles, build scripts, ...) go out without asking you
+> (synthe-notify digest lists them afterwards); --auto-approve routine makes them ask too.
+> ...
+> With no limit and no expiry this is a standing permission: it stays open until you close it.
+
+Read it, answer `Y`, and type your passphrase (Touch ID instead, if you have enrolled it). That is
+the lane: one signature, until you revoke it.
+
+Choose `[1]` if you want to read every push before it goes out; step 8 then shows you how. A run with
+no one at the keyboard never picks `[2]` for you.
+
+### Question 2: notifications?
+
+Setup then offers to turn notifications on. Answer `Y` (or press Return). It installs
+`synthe-notify watch` as a login item **in your account**, not the agent's (a LaunchAgent,
+`~/Library/LaunchAgents/com.synthe.notify.plist`), and starts it now.
+
+Check that a notification reaches you:
+
+```bash
+~/synthe-venv/bin/synthe-notify test
+```
+
+**You should see:** a banner titled "Synthe test: ..." saying it is a test and nothing happened. If no
+banner appears, macOS may be holding notifications from Script Editor (which shows them for scripts):
+allow it in System Settings → Notifications. Prefer Slack? See [`docs/NOTIFY.md`](docs/NOTIFY.md).
+
+Said no? Run `~/synthe-venv/bin/synthe-notify install-agent` any time; `uninstall-agent` turns it off.
 
 ## 6. Give OpenClaw a model and start it (agent's account)
 
@@ -155,7 +196,7 @@ plugin doesn't run, and only the missing credentials stop a push.
 
 Leave this window open. It's the agent's window.
 
-## 7. Give OpenClaw a task (your account)
+## 7. Give OpenClaw work (your account)
 
 Open a **new** Terminal window (⌘N). It runs as you, not as `openclaw`.
 
@@ -163,7 +204,8 @@ Open a **new** Terminal window (⌘N). It runs as you, not as `openclaw`.
 cd ~/synthe && ~/synthe-venv/bin/synthe-task new "Add a greeting and test it" --branch agent/first-push
 ```
 
-Type your approval passphrase.
+Type your approval passphrase. Today each piece of work still starts with a task you sign (its
+purpose and its branch); the lane decides which of its pushes go out without asking you.
 
 **You should see:** a `PASS` line for `signed with your key` and `agent/first-push`, then a **Tell OpenClaw**
 paragraph. Copy that paragraph and paste it into the agent's window from step 6.
@@ -171,20 +213,35 @@ paragraph. Copy that paragraph and paste it into the agent's window from step 6.
 OpenClaw checks the task, commits on `agent/first-push` and proposes the push through Synthe. It
 can't push by itself.
 
-## 8. Read the diff and approve (your account)
+## 8. Let it go out, or approve it when Synthe asks
 
-When OpenClaw says the push is **staged**, run this in your window:
+**With the lane (`[2]`):** a change to `src/` goes out on its own. OpenClaw reports the push as
+**executed**, with a receipt number, and you hear nothing. That silence is the point.
+
+**When Synthe needs you**, you get a notification that says what and why, for example:
+
+> **Synthe is waiting for you.** Needs you: agent/first-push changes a CI workflow
+> (.github/workflows/ci.yml). Your lane lets routine and review-level work through; this one is
+> high-risk. Run synthe-approve to see the diff.
+
+or "agent/first-push changes 3 files outside your lane (docs/a.md, …)". A push Synthe refused
+outright (a forbidden path, a branch the agent may not use, a forged approval) arrives as
+**Blocked**, with what it stopped and why that mattered. Nothing went out. With `[1]`, every push
+waits for you like this.
+
+To decide on a push that is waiting, run this in your window:
 
 ```bash
 SYNTHE_BROKER=unix:///var/db/synthe-run/broker.sock ~/synthe-venv/bin/synthe-approve
 ```
 
-The diff it shows is the broker's own copy of the commit, not the agent's description of it.
+The diff it shows is the broker's own copy of the commit, not the agent's description of it. The card
+says why it came to you ("Outside your lane: N files", "Your lane sent this to you because: ...").
 
 - Read it. A push that is large, deletes files, or touches CI, dependency or secrets-like files is
   marked CHECK or HIGH-RISK. For a high-risk push you type the last 4 characters of the commit first.
   A long diff has to be viewed in full (`v`) before you can approve.
-- Press `a` to approve, then type your approval passphrase.
+- Press `a` to approve, then type your approval passphrase. Or reject it; nothing is pushed.
 
 **You should see:**
 
@@ -193,7 +250,7 @@ The diff it shows is the broker's own copy of the commit, not the agent's descri
  Push: executed (receipt #M)  1a2b3c4d5e6f → agent/first-push
 ```
 
-Your receipt numbers and commit will differ. Note the commit's first characters.
+Your receipt numbers and commit will differ.
 
 ## Check: what you should see
 
@@ -204,42 +261,53 @@ git ls-remote https://github.com/YOU/REPO.git refs/heads/agent/first-push refs/h
 ```
 
 You're done when all four of these hold:
-- [ ] `refs/heads/agent/first-push` exists, and its commit starts with the characters from step 8.
+- [ ] `refs/heads/agent/first-push` exists, at the commit OpenClaw reported (or the one you approved).
 - [ ] `refs/heads/main` is the same commit it was before you started.
 - [ ] The doctor in step 5 said **ENFORCED**, with only the barrier plugin mode `WARN`.
-- [ ] OpenClaw said it **proposed** the push and waited. It didn't push.
+- [ ] OpenClaw said it **proposed** the push through Synthe. It didn't push by itself.
 
-If the branch isn't there, run `synthe-approve` again: an unapproved proposal stays staged, and the
-receipt numbers from step 8 tell you what the broker decided.
+If the branch isn't there, run `synthe-approve`: a push that is waiting for you stays staged, and its
+receipt says what the broker decided.
+
+## 9. See what Synthe did for you
+
+A few days in, ask for the digest:
+
+```bash
+~/synthe-venv/bin/synthe-notify digest
+```
+
+It checks the receipt chain against the broker's key first, then says, in plain English, how many
+pushes went out without asking you, how many needed you and why, and which risky attempts were
+stopped. It also lists the review-level pushes that went out under your lane, for example "3
+dependency or build changes went out under your lane without asking you", so you can look at them
+afterwards. `--days 30` looks further back.
 
 ## Next
 
-- **Stop approving every push (a lane).** `[2]` above is this command with your setup's defaults; run
-  it yourself any time, in your own terminal:
+- **Change the lane.** `[2]` in step 5 is this command with your setup's defaults; run it yourself any
+  time, in your own terminal:
 
   ```bash
   ~/synthe-venv/bin/synthe-task grant
   ```
 
-  It shows what you are allowing in plain words, for example "Agent openclaw may push to agent/*
-  changing src/**, with no limit on pushes, with no expiry", then asks and signs with your key (Touch ID
-  if you enrolled it, otherwise your passphrase). Pushes inside the lane go out with no prompt;
-  anything else still asks you. Cap it if you want to: `--uses 50 --until 7d` (also `--branch`,
-  `--paths`, `--remote`, `--agent`, `--delegate`, `--brief`). It refuses `main`, `master`, `*` and
-  `**`, and any path your setup forbids.
+  It shows what you are allowing, asks, then signs. Options:
+  - `--auto-approve routine`: dependency manifests and lockfiles, Dockerfiles, build scripts, any
+    deletion and larger diffs ask you too; only routine pushes go out alone.
+  - `--uses 50 --until 7d`: a ceiling. With neither, there is no limit and no expiry.
+  - also `--branch`, `--paths`, `--remote`, `--agent`, `--delegate` (a model reviewer instead of you),
+    `--brief`.
+
+  It refuses `main`, `master`, `*` and `**`, and any path your setup forbids.
 
   ```bash
   ~/synthe-venv/bin/synthe-task grants                 # open lanes, uses left, expiry, and which to renew
   ~/synthe-venv/bin/synthe-task revoke-grant lane-ID   # close one now
   ```
 
-  Be clear about the trade. A lane with no limit and no expiry is a standing permission until you
-  revoke it, and while it is open nobody reads each push before it goes out. Synthe still checks the
-  branch and the files at every push, refuses what is outside the lane, and signs a receipt for each
-  one, so you can audit afterwards. It does not look at what the diff does: a lane can push bad code
-  inside its paths. Today nothing inside a lane flags a push as high-risk for your review (that is
-  being added); until then, use `--uses` and `--until`, or option `[1]`, if you want a ceiling.
-  Enrolling Touch ID or changing the agent's policy makes existing lanes `stale`; sign a new one.
+  Enrolling Touch ID, changing the agent's policy or the broker's risk rules makes existing lanes
+  `stale`; sign a new one.
 - **Approve with Touch ID.** Enroll a Secure Enclave key, then install the updated registry and code
   into the broker:
 
@@ -251,6 +319,8 @@ receipt numbers from step 8 tell you what the broker decided.
   Your passphrase key stays as the fallback (`synthe-approve --passphrase`). Read
   [`docs/TOUCHID.md`](docs/TOUCHID.md) first: Touch ID protects the approval key, but it doesn't
   decide whether a diff is safe.
+- **Notifications in Slack, or more of them.** [`docs/NOTIFY.md`](docs/NOTIFY.md): a Slack webhook,
+  `--all-refusals`, and exactly what stays quiet.
 - **Your approval history.** `synthe-approve --stats` shows your approval rate and time to decision,
   from a local log that never leaves your Mac (owner-only, last 1,000 decisions;
   `SYNTHE_APPROVALS_LOG=off` turns it off).
@@ -259,13 +329,24 @@ receipt numbers from step 8 tell you what the broker decided.
   key.
 - **Audit receipts without the broker:** [`docs/VERIFY.md`](docs/VERIFY.md).
 - **Let your coding agent do steps 2 to 4:** point it at `skills/synthe-setup/SKILL.md`. Step 5 is
-  always yours, because that's where the secrets are typed.
+  always yours, because that's where the secrets are typed and the lane is signed.
 
 ## What this does not claim
 
+- **A lane is a standing permission.** With no limit and no expiry it stays open until you revoke it,
+  and while it is open nobody reads each push before it goes out. Synthe still checks the branch and
+  the files at every push, sends you what is high-risk or outside the lane, and signs a receipt for
+  each one, so you can audit afterwards.
+- **The risk check reads paths and sizes, not code.** A malicious change to an ordinary-looking file
+  under `src/` is routine and goes out. Review-level changes (dependency manifests, lockfiles,
+  Dockerfiles, build scripts) go out without asking under the default lane; the digest lists them
+  afterwards, and `--auto-approve routine` makes them ask. Synthe doesn't judge whether the code is
+  correct.
+- **Silence is not proof.** Notifications report what the broker recorded, polled every 15 seconds.
+  An agent that never proposes a push leaves no receipt. What stops it pushing around Synthe is that
+  its account holds no credential, not the notifier.
 - **The plugin is a seatbelt, not the wall.** It works only through the gateway, and obfuscated
   commands or another git library can get past its text matching. The wall is credential custody:
   the agent's account has no GitHub token, `gh` login or SSH key that can push, and `doctor` checks
   that.
-- **Synthe mediates git effects.** It doesn't stop prompt injection, and it doesn't judge whether
-  the code you approve is correct.
+- **Synthe mediates git effects.** It doesn't stop prompt injection.
