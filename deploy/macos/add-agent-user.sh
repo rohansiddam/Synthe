@@ -57,7 +57,7 @@ cp -R "$HERE/integrations/openclaw" "$APP/integrations/openclaw"
 rm -rf "$APP/integrations/openclaw/tests"
 chown -R root:wheel "$APP/integrations"
 chmod -R u=rwX,go=rX "$APP/integrations"
-for name in init mcp task client; do
+for name in init mcp task client notify; do
   printf '#!/bin/sh\nexec %s %s "$@"\n' "$BPY" "$APP/src/synthe_$name.py" > "$APP/venv/bin/synthe-$name"
   chown root:wheel "$APP/venv/bin/synthe-$name"
   chmod 755 "$APP/venv/bin/synthe-$name"

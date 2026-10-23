@@ -8,6 +8,7 @@ It runs in **your** account: not the agent's, and not the broker's. Apache-2.0, 
 
 ```sh
 synthe-notify test              # a sample notification, so you know it reaches you
+synthe-notify install-agent     # run `watch` at login (setup offers this)
 synthe-notify watch             # stays running; notifies as things happen
 synthe-notify digest            # "This week: ..." in plain English (--days 30, --json)
 ```
@@ -83,46 +84,24 @@ text: control codes and terminal escapes are stripped and it is shortened before
 
 ## Run it at login
 
-**macOS**, as a login item for your user (`~/Library/LaunchAgents/com.synthe.notify.plist`; use the path
-`command -v synthe-notify` prints):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.synthe.notify</string>
-  <key>ProgramArguments</key><array>
-    <string>/usr/local/bin/synthe-notify</string><string>watch</string><string>--stdout</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/synthe-notify.log</string>
-  <key>StandardErrorPath</key><string>/tmp/synthe-notify.log</string>
-</dict></plist>
-```
-
 ```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.synthe.notify.plist
+synthe-notify install-agent      # starts now and at every login, in this account
+synthe-notify uninstall-agent    # stops it and removes the service
 ```
 
-**Linux**, as a user service (`~/.config/systemd/user/synthe-notify.service`):
+Setup offers this as its last question ("Turn notifications on? [Y/n]", after "How hands-off?"), in your
+own terminal and your own account. Without a person at the terminal it installs nothing.
 
-```ini
-[Unit]
-Description=Synthe notifications
+- **macOS**: a LaunchAgent, `~/Library/LaunchAgents/com.synthe.notify.plist`, started with
+  `launchctl bootstrap gui/<your uid>`. It runs `synthe-notify watch --stdout`; the log is `~/.synthe/notify.log`.
+- **Linux**: a systemd user service, `~/.config/systemd/user/synthe-notify.service`, enabled with
+  `systemctl --user enable --now`. Log: `journalctl --user -u synthe-notify.service`. For it to run while
+  you are logged out, `loginctl enable-linger` your account (your choice; setup does not do it).
 
-[Service]
-ExecStart=%h/.local/bin/synthe-notify watch --stdout
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user enable --now synthe-notify
-journalctl --user -u synthe-notify -f
-```
+It refuses to install as root, as the broker's account (`_synthe`, `synthe`), or in the agent's account
+(where `~/.synthe/setup.json` says `"role": "agent"`): an agent that controls the notifier decides what you
+hear. Running it again replaces the service. The command it runs is the `synthe-notify` on your `PATH`
+(resolved to its real path), else this checkout's `src/synthe_notify.py` with the same Python.
 
 ## Limits
 

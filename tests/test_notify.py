@@ -904,3 +904,97 @@ def test_watch_reads_a_real_broker_over_its_socket_and_hears_about_the_blocked_c
                         "--config", str(tmp_path / "none.json")]) == 1
         cap = capsys.readouterr()
         assert cap.out == "" and "signature_invalid" in cap.err
+
+
+# -- running at login: install-agent / uninstall-agent, and the offer at the end of setup ------------------
+
+class Runs:
+    def __init__(self, code=0):
+        self.calls, self.code = [], code
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, self.code, "", "boom" if self.code else "")
+
+
+def test_install_agent_on_macos_writes_a_launch_agent_in_your_account_and_starts_it(tmp_path):
+    import plistlib
+    run = Runs()
+    r = sn.install_agent(tmp_path, platform="darwin", run=run, uid=501, user="rohan",
+                         program=["/opt/synthe/bin/synthe-notify"], out=lambda *_: None)
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.synthe.notify.plist"
+    assert r == {"installed": str(plist), "started": True, "kind": "launchd"}
+    body = plistlib.loads(plist.read_bytes())
+    assert body["ProgramArguments"] == ["/opt/synthe/bin/synthe-notify", "watch", "--stdout", "--interval", "15"]
+    assert body["RunAtLoad"] and body["KeepAlive"] and body["StandardOutPath"] == str(tmp_path / ".synthe/notify.log")
+    assert run.calls[-1] == ["launchctl", "bootstrap", "gui/501", str(plist)]
+    sn.install_agent(tmp_path, platform="darwin", run=run, uid=501, user="rohan", program=["/x"], out=lambda *_: None)
+    assert run.calls[-2][:2] == ["launchctl", "bootout"]          # a second install replaces the first
+    assert sn.uninstall_agent(tmp_path, platform="darwin", run=run, uid=501, out=lambda *_: None) == {"removed": True}
+    assert not plist.exists() and run.calls[-1][:2] == ["launchctl", "bootout"]
+
+
+def test_install_agent_on_linux_writes_a_user_unit_and_quotes_its_command(tmp_path):
+    run = Runs()
+    r = sn.install_agent(tmp_path, platform="linux", run=run, uid=1000, user="rohan",
+                         program=["/home/rohan/synthe venv/bin/synthe-notify"], interval=30, out=lambda *_: None)
+    unit = tmp_path / ".config/systemd/user/synthe-notify.service"
+    assert r["started"] and r["kind"] == "systemd"
+    assert 'ExecStart="/home/rohan/synthe venv/bin/synthe-notify" "watch" "--stdout" "--interval" "30"' in unit.read_text()
+    assert ["systemctl", "--user", "enable", "--now", "synthe-notify.service"] in run.calls
+    with pytest.raises(sn.SourceError, match="systemd unit"):
+        sn.install_agent(tmp_path, platform="linux", run=run, uid=1000, user="rohan", program=["/a\nExecStart=/evil"])
+    assert sn.uninstall_agent(tmp_path, platform="linux", run=run, uid=1000, out=lambda *_: None)["removed"]
+    assert not unit.exists()
+
+
+def test_a_failed_start_is_said_not_hidden(tmp_path):
+    said = []
+    r = sn.install_agent(tmp_path, platform="darwin", run=Runs(code=5), uid=501, user="rohan", program=["/x"],
+                         out=said.append)
+    assert r["started"] is False and "starting it failed" in said[0]
+
+
+@pytest.mark.parametrize("user,uid,role", [("root", 0, None), ("_synthe", 250, None), ("synthe", 990, None),
+                                           ("openclaw", 502, "agent")])
+def test_install_agent_refuses_root_the_broker_and_the_agents_account(tmp_path, user, uid, role):
+    if role:
+        (tmp_path / ".synthe").mkdir()
+        (tmp_path / ".synthe" / "setup.json").write_text(json.dumps({"role": role}))
+    run = Runs()
+    with pytest.raises(sn.SourceError, match="not turning notifications on here"):
+        sn.install_agent(tmp_path, platform="darwin", run=run, uid=uid, user=user, program=["/x"])
+    assert run.calls == [] and not (tmp_path / "Library").exists()
+
+
+def test_install_agent_cli_exists():
+    out = subprocess.run([os.environ.get("PYTHON", "python3"), str(ROOT / "src/synthe_notify.py"), "--help"],
+                         capture_output=True, text=True)
+    assert "install-agent" in out.stdout and "uninstall-agent" in out.stdout
+
+
+def test_setup_offers_notifications_once_and_never_installs_without_a_person(tmp_path):
+    import synthe_init as si
+    said, installs = [], []
+    install = lambda **kw: installs.append(kw) or {"started": True}  # noqa: E731
+    assert si.offer_notifications(tmp_path, interactive=False, out=said.append, install=install) == "off"
+    assert installs == [] and "synthe-notify install-agent" in said[-1]
+    assert si.offer_notifications(tmp_path, interactive=True, ask=lambda q: "", out=said.append, install=install) == "on"
+    assert len(installs) == 1                                   # Return alone: yes
+    assert si.offer_notifications(tmp_path, interactive=True, ask=lambda q: "n", out=said.append, install=install) == "off"
+    si.write_setup(tmp_path, {"role": "agent"})
+    assert si.offer_notifications(tmp_path, interactive=True, ask=lambda q: "y", out=said.append, install=install) == "off"
+    assert len(installs) == 1 and "agent's" in said[-1]
+
+
+def test_finish_setup_offers_notifications_after_the_lane(tmp_path, monkeypatch):
+    import synthe_init as si
+    monkeypatch.setattr(si.sys, "platform", "darwin")
+    monkeypatch.setattr(si.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(si.shutil, "which", lambda x: "/usr/bin/" + x)
+    monkeypatch.setattr(si, "source_root", lambda: ROOT)
+    text = si.prepare(tmp_path / "setup", repo_url="https://github.com/example/repo.git", branches=["agent/*"],
+                      allowed_paths=["src/**"], agent_account="worker", approver="human", python="/usr/bin/python3",
+                      script_path=ROOT / "src/synthe_init.py", node=tmp_path / "absent", agent_kind="none").read_text()
+    assert text.index("lane-offer") < text.index("notify-offer")
+    assert "sudo" not in text.split("lane-offer")[1]            # in the person's account, after the admin step

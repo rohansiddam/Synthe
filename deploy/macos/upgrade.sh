@@ -41,12 +41,12 @@ if [ -d "$APP/integrations/openclaw" ]; then
   chown -R root:wheel "$APP/integrations"
   chmod -R u=rwX,go=rX "$APP/integrations"
 fi
-for name in init mcp task client; do
+for name in init mcp task client notify; do
   printf '#!/bin/sh\nexec %s %s "$@"\n' "$BPY" "$APP/src/synthe_$name.py" > "$APP/venv/bin/synthe-$name"
 done
 printf '#!/bin/sh\nexec %s %s "$@"\n' "$BPY" "$APP/src/synthe_git_remote.py" > "$APP/venv/bin/git-remote-synthe"
 for f in "$APP"/venv/bin/synthe-init "$APP"/venv/bin/synthe-mcp "$APP"/venv/bin/synthe-task \
-         "$APP"/venv/bin/synthe-client "$APP"/venv/bin/git-remote-synthe; do
+         "$APP"/venv/bin/synthe-client "$APP"/venv/bin/synthe-notify "$APP"/venv/bin/git-remote-synthe; do
   chown root:wheel "$f"; chmod 755 "$f"
 done
 

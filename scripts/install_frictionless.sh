@@ -110,7 +110,7 @@ fi
 
 # Symlink executables to ~/.local/bin and export PATH
 mkdir -p "$HOME/.local/bin"
-for bin in synthe-init synthe-mcp synthe-approve synthe-task synthe-client synthe-verify git-remote-synthe; do
+for bin in synthe-init synthe-mcp synthe-approve synthe-task synthe-client synthe-verify synthe-notify git-remote-synthe; do
     if [ -f "$HOME/synthe-venv/bin/$bin" ]; then
         ln -sf "$HOME/synthe-venv/bin/$bin" "$HOME/.local/bin/$bin"
         if [ -w /usr/local/bin ]; then

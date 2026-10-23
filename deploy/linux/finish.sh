@@ -36,7 +36,7 @@ install -d -o "$APPROVER" -m 755 "$SHARED/inbox"
 install -d -m 755 "$APP/bin" "$APP/integrations"
 cp -R "$HERE/integrations/openclaw" "$APP/integrations/"
 chmod -R go-w "$APP/integrations"
-for name in init mcp task client approve verify; do
+for name in init mcp task client approve verify notify; do
   printf '#!/bin/sh\nexec /opt/synthe/venv/bin/python /opt/synthe/src/synthe_%s.py "$@"\n' "$name" > "$APP/bin/synthe-$name"
   chmod 755 "$APP/bin/synthe-$name"
 done

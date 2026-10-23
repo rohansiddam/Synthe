@@ -5,6 +5,7 @@
   synthe-notify watch  [--once] [--interval 15] [--from-start] [--all-refusals] [--stdout]
   synthe-notify digest [--days 7] [--json]
   synthe-notify test
+  synthe-notify install-agent | uninstall-agent    (run `watch` at login: LaunchAgent / systemd --user)
 
 Run it in YOUR account, not the agent's and not the broker's. It reads the broker's receipt chain,
 checks the chain against the broker's public key (synthe_verify.py, the same code `synthe-verify`
@@ -1195,6 +1196,139 @@ def cmd_test(opts) -> int:
     return 1
 
 
+# ---- run at login: a LaunchAgent (macOS) or a systemd user service (Linux), in YOUR account -------------
+
+LABEL = "com.synthe.notify"
+UNIT = "synthe-notify.service"
+BROKER_USERS = ("root", "synthe", "_synthe")
+
+
+def _account_problem(home: Path, user: str | None = None, uid: int | None = None) -> str | None:
+    """Why this account must not run the notifier, or None. It is the person's tool: the agent's account would
+    let the agent decide what you hear, and the broker's or root's would mix the watcher with the wall."""
+    uid = os.geteuid() if uid is None else uid
+    user = user or os.environ.get("USER") or ""
+    if uid == 0 or user in BROKER_USERS:
+        return "run it as yourself, not as root or the broker's account"
+    try:
+        role = json.loads((home / ".synthe" / "setup.json").read_text()).get("role")
+    except (OSError, ValueError, AttributeError):
+        role = None
+    if role == "agent":
+        return ("this is the agent's account (its ~/.synthe/setup.json says so); notifications belong in the "
+                "account of the person who approves")
+    return None
+
+
+def _program() -> list[str]:
+    """How the service starts the watcher: the installed command, or this file with this interpreter."""
+    found = shutil.which("synthe-notify")
+    if found:
+        return [os.path.realpath(found)]
+    return [os.path.realpath(sys.executable), str(Path(__file__).resolve())]
+
+
+def agent_files(home: Path, platform: str | None = None) -> dict:
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return {"kind": "launchd", "path": home / "Library" / "LaunchAgents" / f"{LABEL}.plist"}
+    if platform.startswith("linux"):
+        return {"kind": "systemd", "path": home / ".config" / "systemd" / "user" / UNIT}
+    raise SourceError(f"running at login is supported on macOS and Linux, not {platform}")
+
+
+def launchd_plist(program: list, log: Path, interval: float) -> bytes:
+    import plistlib
+    return plistlib.dumps({"Label": LABEL, "ProgramArguments": [*map(str, program), "watch", "--stdout",
+                                                                "--interval", f"{interval:g}"],
+                           "RunAtLoad": True, "KeepAlive": True, "ProcessType": "Background",
+                           "StandardOutPath": str(log), "StandardErrorPath": str(log)})
+
+
+def _unit_arg(a) -> str:
+    a = str(a)
+    if any(c in a for c in "\n\r%\"\\$"):
+        raise SourceError(f"cannot put {a!r} in a systemd unit; install synthe-notify on a plain path")
+    return f'"{a}"'
+
+
+def systemd_unit(program: list, interval: float) -> str:
+    cmd = " ".join(_unit_arg(a) for a in [*program, "watch", "--stdout", "--interval", f"{interval:g}"])
+    return ("[Unit]\nDescription=Synthe notifications (only when Synthe stops or flags something)\n\n"
+            f"[Service]\nExecStart={cmd}\nRestart=on-failure\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n")
+
+
+def install_agent(home: Path | None = None, *, platform: str | None = None, run=subprocess.run, interval: float = 15,
+                  program: list | None = None, uid: int | None = None, user: str | None = None, out=print) -> dict:
+    """Start `synthe-notify watch` at login for this account and now. Idempotent: an existing service is
+    replaced. Refuses the agent's account, the broker's and root."""
+    home = Path(home or Path.home())
+    why = _account_problem(home, user, uid)
+    if why:
+        raise SourceError(f"not turning notifications on here: {why}")
+    f = agent_files(home, platform)
+    program = program or _program()
+    path: Path = f["path"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    uid = os.geteuid() if uid is None else uid
+    if f["kind"] == "launchd":
+        log = home / ".synthe" / "notify.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(launchd_plist(program, log, interval))
+        os.chmod(path, 0o644)
+        run(["launchctl", "bootout", f"gui/{uid}", str(path)], capture_output=True)
+        r = run(["launchctl", "bootstrap", f"gui/{uid}", str(path)], capture_output=True, text=True)
+        where = f"log: {log}"
+    else:
+        path.write_text(systemd_unit(program, interval))
+        os.chmod(path, 0o644)
+        run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        r = run(["systemctl", "--user", "enable", "--now", UNIT], capture_output=True, text=True)
+        where = f"log: journalctl --user -u {UNIT}"
+    ok = getattr(r, "returncode", 1) == 0
+    if ok:
+        out(f"Notifications are on: synthe-notify watch runs at login in this account ({path}; {where}).")
+    else:
+        out(f"Wrote {path}, but starting it failed: {clean(getattr(r, 'stderr', '') or 'no detail', 200)}")
+    return {"installed": str(path), "started": ok, "kind": f["kind"]}
+
+
+def uninstall_agent(home: Path | None = None, *, platform: str | None = None, run=subprocess.run,
+                    uid: int | None = None, out=print) -> dict:
+    home = Path(home or Path.home())
+    f = agent_files(home, platform)
+    path: Path = f["path"]
+    uid = os.geteuid() if uid is None else uid
+    if f["kind"] == "launchd":
+        run(["launchctl", "bootout", f"gui/{uid}", str(path)], capture_output=True)
+    else:
+        run(["systemctl", "--user", "disable", "--now", UNIT], capture_output=True)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    if f["kind"] == "systemd":
+        run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    out("Notifications are off (the service is removed)." if existed else "Notifications were not installed here.")
+    return {"removed": existed}
+
+
+def cmd_install_agent(opts) -> int:
+    try:
+        r = install_agent(interval=opts.interval)
+    except SourceError as e:
+        print(f"synthe-notify: {e}", file=sys.stderr)
+        return 2
+    return 0 if r["started"] else 1
+
+
+def cmd_uninstall_agent(opts) -> int:
+    try:
+        uninstall_agent()
+    except SourceError as e:
+        print(f"synthe-notify: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="synthe-notify", description=__doc__.split("\n\n")[0])
     common = argparse.ArgumentParser(add_help=False)
@@ -1215,11 +1349,15 @@ def main(argv=None) -> int:
     d.add_argument("--days", type=int, default=7)
     d.add_argument("--json", action="store_true")
     sub.add_parser("test", parents=[common], help="send a sample notification")
+    ia = sub.add_parser("install-agent", help="run `watch` at login in this account (LaunchAgent or systemd --user)")
+    ia.add_argument("--interval", type=float, default=15, help="seconds between looks (default 15)")
+    sub.add_parser("uninstall-agent", help="stop running `watch` at login")
     opts = ap.parse_args(argv)
     if opts.cmd == "digest" and opts.days < 1:
         ap.error("--days must be at least 1")
     opts.config_values = {}
-    return {"watch": cmd_watch, "digest": cmd_digest, "test": cmd_test}[opts.cmd](opts)
+    return {"watch": cmd_watch, "digest": cmd_digest, "test": cmd_test, "install-agent": cmd_install_agent,
+            "uninstall-agent": cmd_uninstall_agent}[opts.cmd](opts)
 
 
 if __name__ == "__main__":

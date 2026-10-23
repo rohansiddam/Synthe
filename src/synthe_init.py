@@ -7,7 +7,8 @@
                     [--home ~/.synthe] [--no-openclaw] [--yes]
   synthe-init doctor [--home ~/.synthe] [--repo PATH] [--json]
   synthe-init serve  [--home ~/.synthe]          (dev isolation: run the broker in the foreground)
-  synthe-init lane-offer [--home ~/.synthe]      (finish-setup.sh runs it last: "how hands-off?", see synthe_grant.py)
+  synthe-init lane-offer [--home ~/.synthe]      (finish-setup.sh runs it: "how hands-off?", see synthe_grant.py)
+  synthe-init notify-offer [--home ~/.synthe]    (finish-setup.sh runs it last: turn on synthe-notify at login)
 
 `setup` writes, under --home (default ~/.synthe):
   approver.key.json   your approver key, sealed under a passphrase you type (never plaintext)
@@ -306,6 +307,8 @@ echo "Now the one admin step (your admin password):"
 sudo bash {q(home / enforce)}
 # The broker is running now, so a lane grant can be signed (it asks first; no answer keeps today's behaviour).
 {q(python)} {q(script_path)} lane-offer --home {q(home)} || true
+# Hear from Synthe only when it stops something or waits for you (in your account, never the agent's).
+{q(python)} {q(script_path)} notify-offer --home {q(home)} || true
 """)
     os.chmod(finish, 0o700)
     return finish
@@ -592,6 +595,41 @@ def add_approval_key(registry_path: Path, entry: dict) -> str:
     registry_path.write_text(json.dumps(registry, indent=2) + "\n")
     os.chmod(registry_path, mode)
     return humans[0]
+
+
+NOTIFY_QUESTION = """Notifications
+  Synthe can tell you, on this Mac or Linux desktop, when it stops something or waits for you (and only
+  then). Pushes that go out under your lane stay quiet; the weekly digest lists them (synthe-notify digest).
+  It runs in your account at login. Off any time: synthe-notify uninstall-agent"""
+
+
+def offer_notifications(home: Path, *, interactive: bool | None = None, ask=input, out=print, install=None) -> str:
+    """Ask once at the end of setup whether to run synthe-notify at login, in this (the person's) account.
+    Without a person at a terminal nothing is installed. Returns "on" or "off"."""
+    import synthe_notify as sn
+    later = "Turn them on any time: synthe-notify install-agent"
+    if interactive is None:
+        interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    if read_setup(home).get("role") == "agent":
+        out(f"Notifications belong in the approver's account, not the agent's. {later}")
+        return "off"
+    if not interactive:
+        out(f"Notifications are off. {later}")
+        return "off"
+    out("\n" + NOTIFY_QUESTION)
+    try:
+        answer = ask("Turn notifications on? [Y/n] ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer not in ("", "y", "yes"):
+        out(f"Notifications are off. {later}")
+        return "off"
+    try:
+        r = (install or sn.install_agent)(out=out)
+    except sn.SourceError as e:
+        out(f"Couldn't turn notifications on: {e}. {later}")
+        return "off"
+    return "on" if r.get("started") else "off"
 
 
 def touchid_setup(home: Path) -> int:
@@ -974,6 +1012,9 @@ def main(argv=None) -> int:
     lo = sub.add_parser("lane-offer", help="ask once whether routine pushes may go without asking you "
                                            "(run by finish-setup.sh once the broker is up)")
     lo.add_argument("--home", default="~/.synthe")
+    no = sub.add_parser("notify-offer", help="ask once whether to run synthe-notify at login in your account "
+                                             "(run by finish-setup.sh last)")
+    no.add_argument("--home", default="~/.synthe")
     r = sub.add_parser("apply-registry", help=argparse.SUPPRESS)  # run by deploy/macos/upgrade.sh, as root
     r.add_argument("--state", required=True)
     r.add_argument("--stage", required=True)
@@ -995,6 +1036,9 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "touchid":
         return touchid_setup(Path(a.home).expanduser())
+    if a.cmd == "notify-offer":  # your terminal, your account
+        offer_notifications(Path(a.home).expanduser())
+        return 0
     if a.cmd == "lane-offer":  # needs your terminal, not OpenClaw
         import synthe_grant as sg
         sg.offer_lane(Path(a.home).expanduser())
