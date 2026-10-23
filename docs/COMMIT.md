@@ -604,6 +604,82 @@ malicious change to an ordinary-looking source file (`src/app.py`) is `routine` 
 is a tripwire for the changes that most often matter (CI, dependencies, secrets, mass deletions, huge
 diffs), not a review.
 
+## Self-issued tasks (v0.7)
+
+Inside a lane the human signed, the agent can start work without the human signing each task. The grant
+says so (`self_issue`, signed with the rest of it); the broker issues each task, signed by its own **task
+issuer** key (registry kind `task_issuer`, held next to the broker key by the broker's OS user, never the
+agent's), checks it against the grant at every step and receipts it. Contract: SPEC section 16. Design and
+threat analysis: [`design/SELF_ISSUED_TASKS.md`](design/SELF_ISSUED_TASKS.md).
+
+**Sign the lane.** `synthe-task grant --self-issue` (setup's "How hands-off?" `[2]` turns it on). The grant
+gains `"self_issue": {"issuer": "synthe-issuer"}`; optional fields cap or narrow it, and each limit is enforced
+only when present (no default limits): `max_tasks`, `max_open`, `max_per_hour`, `task_hours` (default: the
+grant's expiry, or 30 days for a grant without one; the receiver's `max_ttl_hours` still caps it),
+`tools` (default `edit_files`, `git_push`), `max_purpose_chars` (default 280), `escalate_at` (`"review"`
+sends review-tier pushes of self-issued tasks to the human too). In v0.7 such a grant must keep a human in
+front of high-risk pushes: `auto_approve` without `"high"`, or a `delegate` (`self_issue_unreviewed`). The
+broker names its issuer in `broker.json` (`lane_templates.self_issue: {"issuer", "key_file"}`), which setup
+writes; `lane_template_draft` returns it as `self_issue_default`.
+
+**Then just push.** In the agent's broker clone:
+
+```bash
+git checkout -b agent/feature-x
+# ... work, commit ...
+git push                                   # optional: -o synthe.purpose="Add a --version flag"
+```
+
+```
+synthe: no signed task for agent/feature-x; Synthe issued task 1 under lane lane-20261023-1a2b3c (signed by rohan). Its purpose is your own words.
+synthe: agent/feature-x at 1a2b3c4d5e6f was pushed by Synthe (receipt #42).
+```
+
+`git-remote-synthe` takes, in order: an explicit task (`SYNTHE_TASK` / `synthe.task`), the newest unexpired
+human-signed task in the inbox, the open self-issued task this clone holds for the branch
+(`.git/synthe/tasks/`), and only then asks the broker to issue one. It writes the request id to
+`.git/synthe/issue/` before asking, so a retry never issues twice. The purpose is the push option, or the tip
+commit's subject cleaned to one plain line. A task that landed, expired or whose grant was revoked is
+replaced by a fresh one, once per push. With no lane that allows it, the push fails as before
+(`no_task_for_branch`), saying how to get a task or such a lane. Issued packets never go in the inbox.
+
+Agents on MCP or the CLI start the task before working, so `exclusive_paths` and `depends_on` apply ahead:
+`synthe_start_task {branch, purpose, owned_paths?, depends_on?, request_id?}` or `synthe-client start
+--branch B --purpose P [--paths ...] [--save task.json]`. Both issue and claim; propose with the returned
+packet and claim token as usual.
+
+**The op.** `issue_task {request_id, branch, purpose, owned_paths?, depends_on?, template_id?, remote?,
+claim?}` returns `{decision: task_issued | task_issue_refused, reasons, receipt, packet, task, replayed}`
+(and `claim` with `claim: true`). The same `request_id` with the same body returns the same packet and
+receipt and appends nothing; another body is `self_issue_request_conflict`. Issue state lives in
+`state_dir/self-issued.json` (0600, under the lane lock).
+
+**What the packet is.** From `synthe-issuer` to the broker's receiver, `idempotency_key` `si:<grant>:<n>`,
+`owned_paths` (default: the grant's `path_scope`), the receiver policy's budget and forbidden actions written
+out, one `git_push` to the grant's remote, no approvals, expiring per the rules above, the task file
+`tasks/si-<hash>-<n>.md` pinned by hash ("Written by agent `openclaw`. Issued by Synthe under lane `…`,
+signed by `rohan`." then the purpose fenced as data), and `issued_under_grant: {grant, issue, issued_at,
+request_id}` with the human-signed grant verbatim. It is signed under
+`synthe/handoff-signature/self-issued/v1`, so an older checker rejects it.
+
+**At every step.** Claim, propose, staged retries and dispatch (under the lane lock, immediately before
+`git push`) re-check that the grant is the stored one, valid and not revoked, and that the broker issued
+this exact packet. Revoking or expiring the grant kills every unlanded task under it, even one a human
+approves; `revoke_lane_template` also denies its staged proposals at once. A self-issued push goes through
+the grant it was issued under, and high-risk pushes escalate to the human as usual (the human approves the
+push itself, never the task). Its paths sit inside the grant's, so a file outside the lane is a
+`path_outside_scope` denial, not an escalation.
+
+**Receipts.** `kind: "task_issue"` for every issue decision; `task_origin` on every later receipt of the
+task (`self_issued`, with the grant, the issue number, who signed the grant, the issuer and the issue
+receipt; or `signed`, with the sender). The approval card heads a self-issued task "Task written by the
+agent" with the human's brief beneath; the reviewer's detail labels it the same way; `synthe-notify digest`
+lists the tasks the agent started and which shipped.
+
+**Limits, plainly.** Work starts without a person reading the task. Within the lane nothing checks that the
+work was wanted: the bounds are the grant's scope, the receiver policy, risk escalation, revocation and the
+receipts ([`THREAT_MODEL.md`](../THREAT_MODEL.md), v0.7).
+
 ## Reason codes (new in v0.4)
 
 | Code | State | Meaning |
@@ -657,6 +733,15 @@ diffs), not a review.
 | `delegate_approval_missing`, `delegate_approval_stale`, `delegate_approval_expired`, `delegate_approval_too_long` | blocked | v0.6: no delegate approval yet; it is not for the staged commit/handoff; it expired; or it asks for more than 60 minutes (or outlives the grant). The proposal stays staged (`review`) |
 | `delegate_escalated` | blocked | v0.6: the delegate sent this proposal to a human; only a human approval commits it (`escalated`) |
 | `delegate_store_corrupt` | invalid | v0.6: the delegate decisions file can't be read |
+| `sender_not_trusted` | blocked | v0.7 (admission): the receiver's `trusted_senders` doesn't list the packet's `from` |
+| `issuer_requires_grant`, `issuer_invalid` | invalid | v0.7: a task issuer signed a packet without `issued_under_grant`, or a packet carrying it isn't from a task issuer; at grant submit, `self_issue.issuer` isn't this broker's registered issuer, or is the receiver, the delegate or a trusted approver |
+| `malformed:issued_under_grant`, `self_issue_purpose_invalid` | invalid | v0.7: the issuance record has the wrong shape; the purpose isn't one line of NFC text without control or format characters, within the grant's limit |
+| `self_issue_grant_invalid`, `self_issue_not_granted`, `self_issue_scope`, `self_issue_ttl` | blocked | v0.7: the embedded grant isn't signed by a trusted human; no live grant with `self_issue` names this issuer and receiver (at issue: none covers the request); the task reaches outside its grant (branch, remote, paths, tools, extra fields); it outlives its grant or `task_hours` |
+| `self_issued_approval_present` | invalid | v0.7: a self-issued packet carries an approval |
+| `self_issue_unknown` | invalid | v0.7: the broker has no record of issuing this exact packet |
+| `self_issue_exhausted`, `self_issue_open_limit`, `self_issue_rate_limited` | blocked | v0.7, at issue: the grant's `max_tasks`, `max_open` or `max_per_hour` (each only when the grant names it) |
+| `self_issue_request_conflict` | conflicting | v0.7, at issue: the `request_id` was used for a different request; nothing issued |
+| `self_issue_unreviewed` | invalid | v0.7, at grant submit: `self_issue` on a grant that would push high-risk work alone (no delegate, and `auto_approve` absent or listing `high`) |
 | `content_conflict` | stale | v0.5: a cited blob isn't what the branch holds now (someone changed the file, a "new" file exists, a deleted file is gone); nothing pushed, re-read and re-apply |
 
 **Reading the repo (v0.5).** `read_file` / `list_files` errors come back as daemon errors (no

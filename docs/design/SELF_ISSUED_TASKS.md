@@ -1,6 +1,33 @@
 # Self-issued tasks inside a human-signed lane
 
-Status: design only. No code changes in this phase. Targets contract v0.7.
+Status: **implemented in contract v0.7** (SPEC section 16, `docs/COMMIT.md` "Self-issued tasks"). This
+document is the design as written; where the build differs, the founder's answers to section 8 and the
+decisions below win:
+
+- **No default limits** (Q2). `max_tasks`, `max_open`, `max_per_hour` are optional signed grant fields,
+  enforced only when present. A task lives as long as `task_hours`, else the grant's expiry, else 30 days;
+  the receiver's `max_ttl_hours` (72 in setup) always caps it, and `git push` issues a fresh one when it lapses.
+- **Revocation and expiry kill unlanded tasks, even under a human approval** (Q1: yes).
+- **Plain `git push`** (Q3): the purpose defaults to the tip commit's subject, cleaned and labelled
+  agent-written; `-o synthe.purpose=` overrides.
+- **Unreviewed self-issue** (Q4): refused unless the grant keeps high-risk pushes for a human
+  (`auto_approve` present without `"high"`) or names a delegate (`self_issue_unreviewed`). The default lane
+  qualifies. (Not "the broker has risk escalation enabled": that is a property of the grant.)
+- **A separate issuer key** (Q5): `synthe-issuer`, kind `task_issuer`, made by setup and the installers as the
+  broker's OS user.
+- **Phase 0 shipped** (Q6): `trusted_senders`; setup writes `[<the human approver>]`. The issuer is not listed
+  there: a self-issued packet is admitted by the human-signed grant it embeds (step 2b), and an issuer-kind
+  key can sign nothing else.
+- **Quiet digest** (Q8): `synthe-notify digest` lists the tasks the agent started and which shipped.
+- **Out-of-lane pushes of self-issued tasks are refused** (`path_outside_scope`), not escalated: the task's
+  paths sit inside the grant's. Human-signed tasks still escalate with `outside_lane_paths`.
+- **Who may ask.** The broker issues only to its own receiver and records the requester's kernel uid; it does
+  not map uids to agents.
+- **Default tools** for an issued task are `edit_files` and `git_push` (the grant's `self_issue.tools` widens
+  them within the receiver policy).
+- Not built: the planner-issuer variant (Phase 5, later), Option D (Q9), a TLA+ `Issue` action (`formal/` is
+  not in this tree), Studio/console wording.
+
 
 ## 1. Problem
 

@@ -1,4 +1,4 @@
-# Synthe threat model (v0.5)
+# Synthe threat model (v0.7)
 
 One page, so design arguments start from the same place.
 
@@ -26,6 +26,7 @@ UX guards, not the credential wall. The new Linux setup path still needs a clean
 | Ledger | `ledger.json` (Action: `actions/cache` + `SYNTHE_LEDGER_ANCHOR` repo variable) | Deleting or resetting it re-enables duplicates -- unless the out-of-cache anchor is configured, in which case rollback/deletion fails closed |
 | Workspace bytes | `--workspace` root | Pins detect changes; they can't stop a changed file being read later |
 | Broker key and remote credentials | the broker's own user (`/var/db/synthe`, `/var/lib/synthe`) or container volume, 0600 | Sign receipts; push anywhere the token can |
+| Task issuer key (v0.7) | next to the broker key, same OS user, 0600 | Sign self-issued tasks, but only inside a grant a human signed, and the broker still checks its own issue record; whoever holds it also holds the GitHub token |
 
 ## In scope: what the gate stops
 
@@ -267,6 +268,54 @@ Limits (say these plainly):
   and staleness when the policy, approvers, effects config or risk rules change. Nothing bounds how many
   pushes it carries or for how long; an agent that is compromised while the lane stands can use it until
   someone notices. Prefer limits for lanes nobody watches.
+
+## v0.7: self-issued tasks (work starts without a person reading the task)
+
+Said plainly: inside a lane that allows it, **work starts without a person reading the task.** The agent
+decides what to work on, writes the task's purpose, writes the code and the commit message, and a routine
+push inside the lane goes out with nobody asked. That is the feature. What bounds it is not a human reading
+each task but: **the grant's scope** (receiver, remote, branch pattern, paths, any limits the human set),
+**the receiver policy** (owned, allowed and forbidden paths, tools, budget, `max_ttl_hours`), **risk
+escalation** (a self-issue grant must send high-risk pushes to a human, or name a reviewer; `escalate_at:
+"review"` sends review-tier ones too), **revocation** (any trusted human closes the lane, and every task issued
+under it that hasn't landed dies with it, even under a human approval) and **receipts** (every issue
+decision and every push, with `task_origin`, listed in the weekly digest). Design and the full analysis:
+[`docs/design/SELF_ISSUED_TASKS.md`](docs/design/SELF_ISSUED_TASKS.md); contract: SPEC section 16.
+
+| Threat | Mechanism | Reason code |
+|---|---|---|
+| A delegate's or the broker's key signs the agent a task (finding F1: the checker had no sender ceiling) | receiver policy `trusted_senders`; setup writes the human approver; an issuer-kind key signs only self-issued packets | `sender_not_trusted`, `issuer_requires_grant` |
+| The agent mints tasks without limit | tasks are issued only by the broker, under the lane lock, from a live grant; the human's optional `max_tasks` / `max_open` / `max_per_hour` are enforced when present; issue numbers are never refunded | `self_issue_not_granted`, `self_issue_exhausted`, `self_issue_open_limit`, `self_issue_rate_limited` |
+| A task wider than its lane (branch, remote, paths, tools, lifetime, extra fields) | the broker builds the packet from the grant; the checker re-checks containment offline, even for a packet the issuer key signed | `self_issue_scope`, `self_issue_ttl` |
+| The agent signs its own authority | the issuer key lives with the broker's user, never the agent's; a packet with `issued_under_grant` from any other identity is refused; the embedded grant must verify under a trusted human's key | `issuer_invalid`, `self_issue_grant_invalid`, `signature_invalid` |
+| Self-approval | a self-issued packet carries no approval; its push is approved by the grant, its delegate, risk escalation to a human, or a human, never by the task | `self_issued_approval_present` |
+| An issued packet edited, stripped of `issued_under_grant`, or given it | the signing domain is chosen by the signed handoff, so any of these breaks the signature | `signature_invalid` |
+| A stolen issuer key (or a bug) signs a task the broker never issued | the broker accepts only the exact packet it recorded issuing | `self_issue_unknown` |
+| Revocation or expiry races the work | the grant is re-checked at claim, propose, for staged proposals, and under the lane lock immediately before `git push`, also under a human's approval | `template_revoked`, `template_expired`, `template_stale` |
+| An old checker accepts an agent-written task as ordinary | its own signing domain: a checker from before v0.7 rejects it | `signature_invalid` |
+| The agent's purpose passes for the human's words, or hides terminal codes | `task_origin` comes from signed fields, never text; the card, the reviewer's detail, the task file and the plan say "written by the agent" and show the human's signed brief next to it; one line, NFC, no control or format characters, bounded length; the risk tier never reads it | `self_issue_purpose_invalid` |
+| A retried issue request spends twice, or a request id is reused for other work | the same `request_id` with the same body replays the stored packet and receipt; another body is refused | `self_issue_request_conflict` |
+
+Limits (say these plainly):
+
+- **Nothing checks that the work was wanted.** The human consented to a class of work; within the lane, a
+  prompt-injected agent can start and land work nobody asked for, as long as each push is routine (or
+  review-tier, under the default lane). The bounds above, not a reviewer, contain it.
+- **A delegate can't check "the diff does what the task asks"** for a self-issued task: the same agent wrote
+  both. Its yardstick is the human's brief and the grant's limits; its instructions say so.
+- **Offline verification is partial.** A standalone checker verifies the issuer signature, the embedded
+  grant and containment; revocation, limits and the issue record are broker state, recorded in `task_issue`
+  receipts.
+- **The issuer key is as safe as the broker's user.** Root, passwordless `sudo` and the `docker` group defeat
+  it, as they defeat the broker.
+- **Who asked is the broker's receiver.** In separate-user mode the broker records the requester's kernel uid
+  but issues only to its own configured receiver; any client the socket admits (the human's account too) can
+  ask for a task for that agent.
+- **An agent's open tasks can hold off a human's** under `exclusive_paths`; there is no pre-emption: the human
+  releases them, or revokes the lane.
+- **Standing lanes and long-lived tasks.** A grant without expiry issues tasks that live 30 days unless the
+  receiver's `max_ttl_hours` is shorter (72 hours in setup's policy). A self-issued task is a bearer token
+  for its lifetime, like any task; revoking the grant kills it.
 
 ## Out of scope: what it does NOT stop (be honest about these)
 

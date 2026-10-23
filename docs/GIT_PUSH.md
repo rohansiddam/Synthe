@@ -26,6 +26,15 @@ The person runs `synthe-approve`, reads the diff and approves. Then the push lan
   (`synthe-task new "..." --branch agent/greet` leaves it there). To name one, set `SYNTHE_TASK` or
   `git config synthe.task PATH`. The inbox is `/Users/Shared/Synthe/inbox`, or `SYNTHE_INBOX` /
   `git config synthe.inbox`.
+- **No signed task? (v0.7)** If the person signed a lane that lets the agent start its own work
+  (`synthe-task grant --self-issue`; setup's lane does), the helper asks the broker to issue a task under
+  it, then claims and proposes as usual: a routine push inside the lane lands with nobody asked, a
+  high-risk one waits for the person. The purpose is the tip commit's subject (cleaned to one line, and
+  labelled everywhere as written by the agent), or `git push -o synthe.purpose="..."`. A human-signed task
+  always wins. The request id is saved under `.git/synthe/issue/` before asking, so a retry never issues
+  twice; the issued task is kept under `.git/synthe/tasks/` until it lands, and replaced when it lands,
+  expires or its lane is revoked. Without such a lane the push fails with `no_task_for_branch`, as before.
+  Details: [`COMMIT.md`](COMMIT.md) "Self-issued tasks".
 - **The claim:** the helper claims the task once and keeps the claim token in `.git/synthe/claims/`
   (mode 600). If the task was already claimed elsewhere, through the MCP tools for example, it says so:
   finish it there.

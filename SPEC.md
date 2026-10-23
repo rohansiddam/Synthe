@@ -1,4 +1,4 @@
-# Handoff Contract v0.5
+# Handoff Contract v0.7
 
 Setup adapters do not change this contract: [agent-neutral setup](docs/ANY_AGENT.md) and the Claude
 Code hook still require the broker's existing authority checks. [Standalone verification](docs/VERIFY.md)
@@ -14,6 +14,9 @@ cannot verify is a REJECT with a reason, never a silent pass.
 - Commit broker: v0.4 mediated effects and receipts (section 14).
 - Concurrency: v0.5 wait-for dependencies (`depends_on`) and exclusive paths (section 8).
 - Isolation: v0.5 the broker runs as its own OS user or in a container; agents use its socket (section 14).
+- Capabilities and topologies: v0.6 (section 15). Lane grants and delegate approvers: v0.6 ([`docs/COMMIT.md`](docs/COMMIT.md)).
+- Self-issued tasks: v0.7 the broker issues a task inside a lane a human signed, under its own signing
+  domain; receivers can name who may send them work (`trusted_senders`) (section 16).
 - Machine-readable shape: [`schema/handoff.schema.json`](schema/handoff.schema.json).
 
 ## 1. Roles
@@ -145,6 +148,7 @@ in every caller. Without one, the registry loads unverified (the CLI warns;
 |---|---|---|
 | `allowed_tools` | ceiling | packet tools outside it → `authority_exceeds_receiver_policy`; planned tools outside it → `tool_not_allowed_by_receiver` |
 | `trusted_approvers` | ceiling | approvals from anyone else → `approver_not_trusted` |
+| `trusted_senders` | ceiling (v0.7) | who may sign a task for this receiver: a packet whose `from` is not listed → `sender_not_trusted`. Absent: any registered sender whose key verifies, as before v0.7. A self-issued packet (section 16) is from the broker's task issuer and is admitted by the human-signed grant it embeds, not by this list. Setup writes `[<the human approver>]` |
 | `forbidden` | restriction | added to the packet's `scope.forbidden` |
 | `approval_required_for` | restriction | added to the packet's list, so a sender cannot drop it |
 | `budget` | ceiling | packet budget above it → `authority_exceeds_receiver_policy`; estimates are checked against the lower of the two |
@@ -186,6 +190,14 @@ bytes never change.
   written as ints.
 - **Packet signature** signs `"synthe/handoff-signature/v1\n" + canonical(handoff)`.
   `signer` must equal `handoff.from`, and the key must be in `agents.<from>.keys`.
+- **Self-issued packet signature (v0.7)** signs `"synthe/handoff-signature/self-issued/v1\n" + canonical(handoff)`.
+  The checker picks the domain from the **signed** handoff: one that holds `issued_under_grant` is
+  self-issued, anything else is ordinary. Removing the field from an issued packet, or adding it to an
+  ordinary one, breaks the signature, and a checker from before v0.7 rejects every self-issued packet
+  with `signature_invalid` (it fails closed). `schema_version` stays `"0.1"`.
+- **Lane grant signature** (the grant a self-issued packet embeds) signs
+  `"synthe/approval-template/v1\n" + canonical(grant without sig)` with the human approver's key
+  (Ed25519 or ES256, as for approvals).
 - **Approval signature** signs `"synthe/approval-signature/v2\n" + canonical({action, approver, expires_at, idempotency_key, from, to, budget, estimates})`.
   That binds an approval to exactly one handoff, so it can't be replayed onto another.
 - **Approvals bind the budget.** The approval pins the `budget` (`tokens`, `usd`,
@@ -239,7 +251,21 @@ Receiver defaults are applied to a copy first. Then:
    declarations (`capability_declaration_missing`, `topology_declaration_missing`)
    when the receiver's policy demands them. *If this step fails,
    checking stops here.*
-2. **Identity.** `from`/`to` exist in the registry and are canonical, and the packet signature verifies.
+2. **Identity.** `from`/`to` exist in the registry and are canonical, and the packet signature verifies
+   (in the domain the signed handoff selects, section 5). v0.7: `from` must be in the receiver's
+   `trusted_senders` when it has one (`sender_not_trusted`); a sender of kind `task_issuer` must carry
+   `issued_under_grant` (`issuer_requires_grant`), and a packet that carries it must come from a
+   `task_issuer` (`issuer_invalid`). Step 1 also checks the shape of `issued_under_grant`
+   (`malformed:issued_under_grant`) and that a self-issued purpose is one line of NFC text with no control
+   or format characters, within the grant's limit (`self_issue_purpose_invalid`).
+   **2b. Issuance (v0.7).** A self-issued handoff stays inside the grant it embeds: the grant verifies
+   under a key of a human in the receiver's `trusted_approvers` (`self_issue_grant_invalid`); it names
+   this receiver and this issuer in `self_issue` (`self_issue_not_granted`); the packet carries no
+   approval (`self_issued_approval_present`); it plans exactly one `git_push`, to the grant's remote, on
+   a branch its `branch_pattern` matches, with `owned_paths` covered by its `path_scope`, tools within
+   `self_issue.tools`, and no `capability` or team roles (`self_issue_scope`); and it expires no later than
+   the grant nor `task_hours` after `issued_at` (`self_issue_ttl`). Revocation, use counts and the issue
+   record are broker state, checked by the broker (section 16).
 3. **Duplication and conflicts.** The idempotency key is looked up in the ledger (section 8). A
    `depends_on` list that closes a wait-for cycle through live claims is `dependency_cycle`; under
    `exclusive_paths`, `owned_paths` that may overlap another live claim on the receiver are
@@ -451,6 +477,13 @@ are `malformed:<f>` codes.
 `delegate_approval_too_long`, `delegate_escalated` (blocked). The other commit-broker codes are listed in
 [`docs/COMMIT.md`](docs/COMMIT.md).
 
+**Self-issued tasks (v0.7):** `malformed:issued_under_grant`, `issuer_requires_grant`, `issuer_invalid`,
+`self_issue_purpose_invalid`, `self_issued_approval_present`, `self_issue_unknown`, `self_issue_unreviewed`
+(invalid); `sender_not_trusted`, `self_issue_grant_invalid`, `self_issue_not_granted`, `self_issue_scope`,
+`self_issue_ttl`, `self_issue_exhausted`, `self_issue_open_limit`, `self_issue_rate_limited` (blocked);
+`self_issue_request_conflict` (conflicting). The broker doctor warns `sender_ceiling_missing` for a receiver
+with no `trusted_senders` while more than one key is registered.
+
 **duplicate / conflicting / unknown:** `idempotency_key_reserved`,
 `duplicate_idempotency_key`, `completion_handoff_mismatch`, `completion_packet_mismatch`,
 `claim_token_invalid`, `release_claim_fresh`, `unknown_outcome`
@@ -464,7 +497,10 @@ are `malformed:<f>` codes.
 | `src/synthe_a2a.py` | A2A v1.0 extension: wraps a packet as a Message and maps the verdict to a TaskStatus (`SUBMITTED` / `INPUT_REQUIRED` when only an approval is missing / `REJECTED`) |
 | `github-action/` | CI gate, with the ledger persisted via `actions/cache` |
 | `src/synthe_commit.py` | commit broker: `serve` (the daemon, run as its own OS user or in a container), `doctor`, `init`, `receipts verify|show`, `ui`. In-process `propose`/`push` and `synthe_mcp.py --broker` are dev-only (isolation mode `none`) (section 14) |
-| `src/synthe_client.py` | v0.5 agent side of the broker (no secrets): `hello`, `claim`, `push` (commits as a git bundle), `complete`, `receipts`, `doctor` |
+| `src/synthe_client.py` | v0.5 agent side of the broker (no secrets): `hello`, `claim`, `push` (commits as a git bundle), `complete`, `receipts`, `doctor`; v0.7 `start` (issue and claim a task inside a lane that allows self-issue) |
+| `src/synthe_git_remote.py` | `git-remote-synthe`: a plain `git push` becomes a proposal; v0.7 issues a task when no human-signed one exists for the branch (section 16) |
+
+With a broker, the MCP server also offers `synthe_start_task` (v0.7, section 16).
 
 On the MCP and A2A entry points, the operator fixes the registry, ledger and workspace on the command line, and the model supplies
 only the packet.
@@ -686,3 +722,83 @@ define, is `registry_malformed`.
 Synthe does not assign roles or manage the team. It only enforces the
 declared topology. An ACCEPT verdict carries the topology name that admitted
 the edge.
+
+## 16. Self-issued tasks (v0.7)
+
+Inside a lane a human signed, the agent can start work without the human signing each task. The broker
+issues the task, checks it against the grant at every step, counts it against any limits the human set,
+labels it everywhere as written by the agent, and receipts it. Design and threat analysis:
+[`docs/design/SELF_ISSUED_TASKS.md`](docs/design/SELF_ISSUED_TASKS.md).
+
+**What it proves, said plainly.** A human signed a lane that lets this agent start tasks on these branches
+and paths (until a time, for a number of tasks, if the human set those). The broker checked the lane was
+live, and within any limits, when it issued the task. The agent wrote the purpose. It does **not** prove the
+human wanted this particular piece of work: the human consented to a class of work, bounded by the lane.
+
+**The grant.** A lane grant (`docs/COMMIT.md`) may carry `self_issue`, signed with the rest of it:
+
+| Field | Rule |
+|---|---|
+| `issuer` | required: the broker's task issuer (`lane_templates.self_issue.issuer` in broker.json), registered with kind `task_issuer` and a key; never the receiver, the delegate or a trusted approver (`issuer_invalid`) |
+| `max_tasks`, `max_open`, `max_per_hour` | optional limits (lifetime tasks; tasks neither completed nor expired; a rolling hour), enforced only when present. Absent: no limit |
+| `task_hours` | optional: how long each task lives. Absent: the grant's expiry, or 30 days for a grant without one. The receiver's `max_ttl_hours` (72 by default in setup) always caps it; the push helper simply issues a fresh task when one expires |
+| `tools` | optional: ⊆ the receiver's `allowed_tools`, must include `git_push`. Absent: `edit_files`, `git_push` |
+| `max_purpose_chars` | optional, 1–1000 (default 280) |
+| `escalate_at` | optional: `"review"` also sends review-tier pushes of self-issued tasks to the human (default `"high"`) |
+
+In v0.7 a self-issue grant must keep a human in front of high-risk pushes: it lists `auto_approve`
+without `"high"`, or names a `delegate`; otherwise it is refused with `self_issue_unreviewed`. The default
+lane (`["routine", "review"]`) qualifies. The issuer key is created at setup next to the broker key, owned
+by the broker's OS user, never the agent's.
+
+**Issuing (`issue_task`).** The agent asks the broker (peer uid from the kernel; tasks always go to the
+broker's own receiver) with `{request_id, branch, purpose, owned_paths?, depends_on?, template_id?, remote?}`.
+A malformed request is a daemon error, not receipted. Under the lane lock the broker: replays a known
+`request_id` with the same body (the same packet and the same receipt; nothing spent), refuses one with a
+different body (`self_issue_request_conflict`); finds a live grant with `self_issue` covering the branch,
+remote and paths (`self_issue_not_granted`, `self_issue_scope`); checks the purpose and the limits
+(`self_issue_purpose_invalid`, `self_issue_exhausted`, `self_issue_open_limit`, `self_issue_rate_limited`);
+then builds the packet from the grant and the receiver's policy (only `purpose`, `branch`, `owned_paths`,
+`depends_on` and `request_id` come from the agent), checks it with the checker itself, records the issue,
+writes the task file (`tasks/si-<sha256(template_id)[:8]>-<n>.md`, a fixed header saying who wrote what, the
+agent's purpose fenced as data) and signs a receipt. The packet is from the issuer to the receiver, with
+`idempotency_key` `si:<template_id>:<n>`, no approvals, `approval_required_for: ["git_push"]`, and
+`issued_under_grant: {grant (verbatim), issue, issued_at, request_id}`. Issue numbers are never refunded.
+With `claim: true` the broker then runs the ordinary claim; issuing and claiming stay separate steps, and
+the claim stays the one admission path.
+
+**At the broker.** At claim, at propose, for staged proposals and again under the lane lock immediately
+before dispatch, a self-issued task must have its grant in the broker's store, byte-equal to the embedded
+one, valid (signature, expiry, lineage) and not revoked (`template_unavailable`, `template_expired`,
+`template_stale`, `template_revoked`), and the broker must have issued exactly this packet
+(`self_issue_unknown`). The checker runs first, so an edited or forged packet is refused for what it is.
+**Revoking or expiring the grant kills every task issued under it that has not landed, even under a human's
+approval:** the human can sign an ordinary task instead. A self-issued push goes through the grant it was
+issued under and no other; a human may still approve it (a high-risk push escalates as usual), and that
+approval spends no use. A self-issued task's paths sit inside its grant's, so a push outside the lane is
+refused (`path_outside_scope`) rather than escalated.
+
+**Receipts.** Every issue decision is a receipt of kind `task_issue` (`task_issued` or `task_issue_refused`)
+with the grant, the task (handoff id, key, packet digest, branch, paths, expiry, `purpose_sha256`,
+`purpose_author`), `requested_by` and the agent's purpose under `agent_says`. Every later receipt for the
+handoff (effects, staged, approvals, delegate decisions) carries `task_origin`, derived from the signed
+packet and the registry, never from text: `{"kind": "self_issued", "template_id", "issue", "granted_by",
+"issuer", "author", "issue_receipt_seq"}` or `{"kind": "signed", "sender", "sender_kind"}`. The plan anchor
+adds `purpose_author`, `task_origin` and, for a self-issued task, the grant's signed `brief`.
+
+**What people see.** The approval card heads the task by origin ("Task written by the agent (self-issued
+under lane …, signed by …)", with the human's own brief beneath), the reviewer's detail labels a self-issued
+task as written by the agent that wrote the diff, and `synthe-notify digest` lists the tasks the agent
+started and which of them shipped.
+
+**`git push`.** `git-remote-synthe` uses, in order: an explicit task, the newest unexpired human-signed task
+in the inbox, the open self-issued task this clone holds for the branch, and only then a new issue (the
+request id is saved before asking, so a retry never issues twice). The purpose is `-o synthe.purpose=…`, or
+the pushed tip commit's subject, cleaned to one plain line. Issued packets never go in the human-written
+inbox. Agents that use MCP or the CLI should start the task before working (`synthe_start_task`,
+`synthe-client start`), so `exclusive_paths` and `depends_on` apply ahead of the work.
+
+**Compatibility.** Receivers without `trusted_senders`, grants without `self_issue` and human-signed tasks are
+unchanged. A broker from before v0.7 refuses a grant carrying `self_issue` (`template_malformed`); a checker
+from before v0.7 rejects a self-issued packet (`signature_invalid`). Adding the issuer to a broker's config
+changes the grant lineage, so grants signed before it become `template_stale` and are signed again.
