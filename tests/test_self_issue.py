@@ -450,19 +450,19 @@ def test_an_older_checker_rejects_the_new_signing_domain(lane, tmp_path):
     c, home = lane["client"], lane["home"]
     grant(c, home)
     packet = issue(c, "r-oldcheck-01")["packet"]
-    old = _older_checker(tmp_path)
     registry = json.loads((home / "broker" / "registry.json").read_text())
+    # the self-issued signature is not a valid ordinary signature (what any checker before v0.7 verifies)
+    key = sc.find_key(registry, ISSUER, packet["signature"]["kid"])
+    raw = sc.unb64u(packet["signature"]["sig"])
+    assert not sc.verify_bytes(key, sc.packet_signing_input(packet["handoff"]), raw)
+    assert sc.verify_bytes(key, sc.self_issued_signing_input(packet["handoff"]), raw)
+    old = _older_checker(tmp_path)       # and an actual older checker, when this checkout has the history
     v = old.check(copy.deepcopy(packet), registry=registry, ledger_path=None, workspace=home / "broker" / "workspace",
                   dry_run=True)
     assert v["decision"] == "REJECT" and "signature_invalid" in codes(v)       # fails closed, never accepts
     # the new checker accepts the same bytes
     assert hc.check(copy.deepcopy(packet), registry=registry, ledger_path=None, defer_approvals={"push_branch"},
                     workspace=home / "broker" / "workspace", dry_run=True)["decision"] == "ACCEPT"
-    # and the self-issued signature is not a valid ordinary signature
-    key = sc.find_key(registry, ISSUER, packet["signature"]["kid"])
-    raw = sc.unb64u(packet["signature"]["sig"])
-    assert not sc.verify_bytes(key, sc.packet_signing_input(packet["handoff"]), raw)
-    assert sc.verify_bytes(key, sc.self_issued_signing_input(packet["handoff"]), raw)
 
 
 # ---- the setup and the broker's files ----------------------------------------------------------------------
