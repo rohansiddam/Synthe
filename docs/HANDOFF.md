@@ -27,8 +27,9 @@ deletions or diffs) and out-of-lane pushes ask the person.
 
 ## Test status
 
-Full suite on a Mac (Python 3.14 with `cryptography`) after the notifications commit: 1979 passed, 81
-skipped, 37 xfailed, 0 failed. See the self-issue commits for the run after B.
+Full suite on a Mac (Python 3.14 with `cryptography`), with A and B done: 2052 passed, 81 skipped,
+37 xfailed, 0 failed (46 minutes; the mutation suites are most of it). All 24 self-issue mutations are
+caught. A Python without `cryptography` fails every test that seals an approver key: use a venv with it.
 
 Environment-only failures in the cloud sandbox (it runs as root, package not installed): 19 in
 `tests/test_install_entrypoint.py`, 4 in `tests/test_plugin_mcp_startup.py`. They should pass on a Mac.
