@@ -101,6 +101,7 @@ def stage(a, out: Path) -> dict:
         "forbidden": ["force_push"],
         "approval_required_for": ["git_push"],
         "trusted_approvers": sorted(approvers),
+        "trusted_senders": sorted(approvers),   # v0.7: only these humans sign this agent's tasks
         "budget": {"tokens": 500000, "usd": 25, "minutes": 240},
         "require_signatures": True, "require_signed_approvals": True,
         "require_planned_actions": True,

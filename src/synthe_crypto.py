@@ -38,6 +38,13 @@ ALG = "Ed25519"
 ALG_ES256 = "ES256"
 APPROVAL_ALGS = (ALG, ALG_ES256)  # packets and receipts stay Ed25519
 PACKET_SIG_DOMAIN = "synthe/handoff-signature/v1"
+# v0.7: a handoff the broker issued under a human-signed lane grant (it carries `issued_under_grant`).
+# Its own domain, so a checker that predates self-issued tasks fails closed on one (signature_invalid),
+# and stripping or adding the field breaks the signature.
+SELF_ISSUED_SIG_DOMAIN = "synthe/handoff-signature/self-issued/v1"
+# A lane grant's human signature (synthe_lane_templates.py); the checker verifies the grant a
+# self-issued handoff embeds with the same rule.
+APPROVAL_TEMPLATE_DOMAIN = "synthe/approval-template/v1"
 APPROVAL_SIG_DOMAIN = "synthe/approval-signature/v2"
 # Retired approval scheme: never signs anymore. Verified only so an approval
 # signed before the budget binding is rejected with
@@ -247,6 +254,26 @@ def generate_secret() -> bytes:
 def packet_signing_input(handoff: dict) -> bytes:
     """Bytes a sender signs: domain tag + canonical JSON of the handoff object."""
     return PACKET_SIG_DOMAIN.encode() + b"\n" + canonical_json(handoff)
+
+
+def self_issued_signing_input(handoff: dict) -> bytes:
+    """Bytes the task issuer signs for a self-issued handoff (v0.7): its own domain tag + canonical JSON."""
+    return SELF_ISSUED_SIG_DOMAIN.encode() + b"\n" + canonical_json(handoff)
+
+
+def handoff_signing_input(handoff: dict) -> bytes:
+    """The signing input a handoff's signature covers, chosen by the SIGNED handoff itself: one that holds
+    `issued_under_grant` is self-issued (v0.7), anything else is an ordinary packet. Removing the field
+    from an issued handoff, or adding it to an ordinary one, therefore breaks its signature."""
+    if isinstance(handoff, dict) and "issued_under_grant" in handoff:
+        return self_issued_signing_input(handoff)
+    return packet_signing_input(handoff)
+
+
+def approval_template_signing_input(grant: dict) -> bytes:
+    """Bytes a human signs for a lane grant: domain tag + canonical JSON of everything but `sig`."""
+    return APPROVAL_TEMPLATE_DOMAIN.encode() + b"\n" + canonical_json(
+        {k: v for k, v in grant.items() if k != "sig"})
 
 
 def approval_signing_input(approval: dict, handoff: dict) -> bytes:

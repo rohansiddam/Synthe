@@ -881,7 +881,8 @@ def parse_utc(value) -> tuple[dt.datetime | None, str | None]:
 
 
 _LIST_SETS = ("forbidden", "approval_required_for", "forbidden_paths")  # restrictions: union
-_LIST_CEILINGS = ("allowed_tools", "trusted_approvers")    # grants: intersection
+# grants: intersection. trusted_senders (v0.7): who may sign a task for this receiver; absent = anyone registered
+_LIST_CEILINGS = ("allowed_tools", "trusted_approvers", "trusted_senders")
 _FLAGS = ("require_signatures", "require_signed_approvals", "verify_evidence",
           "require_planned_actions", "exclusive_paths",
           "require_capability_declaration", "require_topology")  # v0.6
@@ -890,6 +891,134 @@ _MINIMUMS = ("max_ttl_hours",)                              # ceilings on time: 
 
 def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+# v0.7 self-issued tasks (SPEC section 16): a handoff the broker's task issuer signed under a lane grant
+# a human signed, which it embeds verbatim (`issued_under_grant`). The grant's `self_issue` object names
+# the issuer and may narrow what such a task can be; these are its defaults.
+ISSUER_KIND = "task_issuer"
+SELF_ISSUE_DEFAULT_TOOLS = ("edit_files", "git_push")
+# A task's lifetime when its grant names no task_hours: the grant's own expiry, or, for a grant without
+# one (a standing lane), 30 days. The receiver's max_ttl_hours still caps it, like any handoff.
+SELF_ISSUE_DEFAULT_TASK_HOURS = 720
+SELF_ISSUE_DEFAULT_PURPOSE_CHARS = 280
+SELF_ISSUE_MAX_PURPOSE_CHARS = 1000
+_ISSUED_FIELDS = {"grant", "issue", "issued_at", "request_id"}
+
+
+def self_issue_purpose_limit(grant) -> int:
+    si = grant.get("self_issue") if isinstance(grant, dict) else None
+    n = si.get("max_purpose_chars") if isinstance(si, dict) else None
+    ok = isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= SELF_ISSUE_MAX_PURPOSE_CHARS
+    return n if ok else SELF_ISSUE_DEFAULT_PURPOSE_CHARS
+
+
+def self_issue_purpose_problem(text, limit: int = SELF_ISSUE_DEFAULT_PURPOSE_CHARS) -> str | None:
+    """Why an agent-written purpose can't go into a self-issued task, or None. It is shown to people and
+    reviewers as data, so it is one line of NFC text with no control or format characters (no terminal
+    escapes, no bidi overrides, no line or paragraph separators), within the grant's length limit."""
+    import unicodedata
+    if not isinstance(text, str) or not text.strip():
+        return "the purpose is empty"
+    if unicodedata.normalize("NFC", text) != text:
+        return "the purpose is not NFC-normalized text"
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp"):
+            return f"the purpose contains a control or format character (U+{ord(ch):04X})"
+    if len(text) > limit:
+        return f"the purpose is {len(text)} characters; this lane allows {limit}"
+    return None
+
+
+def _issued_shape(iug) -> str | None:
+    """Why `issued_under_grant` is malformed, or None."""
+    if not isinstance(iug, dict) or set(iug) != _ISSUED_FIELDS:
+        return "issued_under_grant must hold exactly grant, issue, issued_at and request_id"
+    if not isinstance(iug["grant"], dict):
+        return "issued_under_grant.grant must be the lane grant object"
+    n = iug["issue"]
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return "issued_under_grant.issue must be a positive whole number"
+    if parse_utc(iug["issued_at"])[0] is None:
+        return "issued_under_grant.issued_at must be a timestamp with a UTC offset"
+    rid = iug["request_id"]
+    if not isinstance(rid, str) or not rid or len(rid) > 128:
+        return "issued_under_grant.request_id must be a non-empty string of at most 128 characters"
+    return None
+
+
+def _check_issuance(h: dict, h_signed: dict, registry: dict | None, policy: dict | None, reasons: list) -> None:
+    """Step 2b (v0.7): a self-issued handoff is inside the human-signed grant it embeds. Pure: no broker
+    state, so revocation, use counts and the issue record are the broker's checks (SPEC section 16)."""
+    iug = h_signed["issued_under_grant"]
+    g = iug["grant"]
+    pol = policy or {}
+    who = ((registry or {}).get("agents") or {}).get(g.get("approver"))
+    good = False
+    if g.get("approver") in (pol.get("trusted_approvers") or []) and isinstance(who, dict) \
+            and who.get("kind") == "human" and g.get("tool") == "git_push" and isinstance(g.get("sig"), str):
+        try:
+            sc = _crypto()
+            good = sc.verify_approval(registry, g.get("approver"), g.get("kid"),
+                                      sc.approval_template_signing_input(g), sc.unb64u(g["sig"]))
+        except Exception:
+            good = False
+    if not good:
+        fail("blocked", "self_issue_grant_invalid",
+             f"the lane grant this task was issued under does not carry a valid signature of a human trusted "
+             f"for '{h.get('to')}' (signed as {g.get('approver')!r})", reasons)
+        return
+    si = g.get("self_issue")
+    if not isinstance(si, dict) or g.get("receiver") != h.get("to") or si.get("issuer") != h.get("from"):
+        fail("blocked", "self_issue_not_granted",
+             f"lane grant {g.get('template_id')!r} does not let {h.get('from')!r} issue tasks to {h.get('to')!r}",
+             reasons)
+        return
+    if ((h_signed.get("authority") or {}).get("approvals") or []):
+        fail("invalid", "self_issued_approval_present",
+             "a self-issued task never carries an approval: its push is approved by the grant, its reviewer or "
+             "a human, never by the task itself", reasons)
+    problems = []
+    gp = g.get("params") if isinstance(g.get("params"), dict) else {}
+    pushes = [a for a in h.get("planned_actions") or [] if isinstance(a, dict) and a.get("tool") == "git_push"]
+    if len(pushes) != 1:
+        problems.append("it must plan exactly one git_push")
+    else:
+        p = pushes[0].get("params") if isinstance(pushes[0].get("params"), dict) else {}
+        if p.get("remote") != gp.get("remote") or not isinstance(p.get("branch"), str) \
+                or not isinstance(gp.get("branch_pattern"), str) or not glob_match(gp["branch_pattern"], p["branch"]):
+            problems.append(f"it pushes {p.get('remote')}:{p.get('branch')}, outside the grant's "
+                            f"{gp.get('remote')}:{gp.get('branch_pattern')}")
+    scope_paths = [s for s in g.get("path_scope") or [] if isinstance(s, str)] \
+        if isinstance(g.get("path_scope"), list) else []
+    owned = [o for o in (h.get("scope") or {}).get("owned_paths") or [] if isinstance(o, str)]
+    outside = [o for o in owned if not any(_glob_covers(s, o) for s in scope_paths)]
+    if not owned or outside:
+        problems.append(f"its paths {outside or owned} are not inside the grant's path_scope {scope_paths}")
+    tools = si.get("tools") if isinstance(si.get("tools"), list) else list(SELF_ISSUE_DEFAULT_TOOLS)
+    used = set((h.get("authority") or {}).get("allowed_tools") or []) | {
+        a.get("tool") for a in h.get("planned_actions") or [] if isinstance(a, dict)}
+    if used - set(tools):
+        problems.append(f"it uses tools the grant doesn't let a self-issued task use: {sorted(map(str, used - set(tools)))}")
+    extra = [f for f in ("capability", "sender_role", "receiver_role") if f in h_signed]
+    if extra:
+        problems.append(f"it declares {extra}, which a self-issued task may not")
+    if problems:
+        fail("blocked", "self_issue_scope", f"this self-issued task is outside its grant: {problems[0]}", reasons)
+    exp, _ = parse_utc((h.get("acceptance") or {}).get("expires_at"))
+    issued, _ = parse_utc(iug["issued_at"])
+    hours = si.get("task_hours")
+    if not (_is_number(hours) and hours > 0):
+        hours = None if "expires_at" in g else SELF_ISSUE_DEFAULT_TASK_HOURS
+    bounds = [issued + dt.timedelta(hours=hours)] if hours is not None and issued is not None else []
+    if "expires_at" in g:
+        gexp, _ = parse_utc(g["expires_at"])
+        bounds.append(gexp)
+    if exp is not None and (issued is None or exp < issued or any(b is None or exp > b for b in bounds)):
+        fail("blocked", "self_issue_ttl",
+             f"this self-issued task stays valid until {h['acceptance']['expires_at']}, past what its grant "
+             f"allows (the grant's expiry, or task_hours after it was issued)", reasons)
 
 
 def _cap_strs(cap: dict, field: str) -> list:
@@ -1454,7 +1583,8 @@ def _is_sha256(value) -> bool:
 # Functions this checker needs from synthe_crypto.py. An older copy next to a
 # newer checker must fail closed with a clear reason, not crash mid-check.
 _CRYPTO_REQUIRED = ("find_key", "usable_keys", "agent_kids", "kid_is_revoked",
-                    "topology_signing_input")
+                    "topology_signing_input", "handoff_signing_input", "approval_template_signing_input",
+                    "verify_approval")
 
 
 def _crypto():
@@ -1521,7 +1651,9 @@ def _verify_packet_signature(packet: dict, h_signed: dict, registry: dict | None
         raw = sc.unb64u(sig["sig"])
     except Exception:
         raw = b""
-    if not sc.verify_bytes(key, sc.packet_signing_input(h_signed), raw):
+    # v0.7: the signed handoff picks its domain (self-issued or ordinary), so a stripped or added
+    # `issued_under_grant` never verifies, and a checker without this rule rejects self-issued ones.
+    if not sc.verify_bytes(key, sc.handoff_signing_input(h_signed), raw):
         fail("invalid", "signature_invalid",
              "packet signature does not verify (packet altered after signing, or wrong key)", reasons)
         return
@@ -1849,6 +1981,18 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
         fail("invalid", "topology_declaration_missing",
              "receiver policy requires sender_role and receiver_role; the packet declares "
              "no team roles", reasons)
+    # v0.7: a self-issued handoff (SPEC section 16): its issuance record, and the agent-written purpose
+    # shown to people and reviewers as data.
+    issued = "issued_under_grant" in h_signed
+    if issued:
+        why = _issued_shape(h_signed["issued_under_grant"])
+        if why:
+            fail("invalid", "malformed:issued_under_grant", why, reasons)
+        else:
+            why = self_issue_purpose_problem(h["purpose"], self_issue_purpose_limit(
+                h_signed["issued_under_grant"]["grant"]))
+            if why:
+                fail("invalid", "self_issue_purpose_invalid", why, reasons)
     if reasons:
         return False, reasons
 
@@ -1863,6 +2007,24 @@ def validate(packet: dict, *, registry: dict | None, ledger: dict,
                 fail("invalid", f"alias_not_canonical:{role}",
                      f"{role} '{who}' is an alias of '{agents[who]['alias_of']}'; use the canonical id", reasons)
     _verify_packet_signature(packet, h_signed, registry, policy, reasons, info)
+    # v0.7: who may sign a task for this receiver. A task issuer signs only self-issued handoffs, which
+    # carry the human grant they were issued under (checked in 2b); everyone else is bound by the
+    # receiver's trusted_senders ceiling, when it has one (absent: any registered sender, as before).
+    if registry is not None:
+        sender_kind = (registry.get("agents", {}).get(h["from"]) or {}).get("kind")
+        if sender_kind == ISSUER_KIND and not issued:
+            fail("invalid", "issuer_requires_grant",
+                 f"'{h['from']}' is a task issuer: it signs only tasks issued under a lane grant", reasons)
+        elif issued and sender_kind != ISSUER_KIND:
+            fail("invalid", "issuer_invalid",
+                 f"'{h['from']}' is not a registered task issuer, so it cannot issue a task under a grant", reasons)
+        senders = (policy or {}).get("trusted_senders")
+        if senders is not None and h["from"] not in senders and not (issued and sender_kind == ISSUER_KIND):
+            fail("blocked", "sender_not_trusted",
+                 f"'{h['from']}' is not a trusted sender for receiver '{h['to']}'", reasons)
+    # 2b. (v0.7) issuance: a self-issued task stays inside the human-signed grant it embeds.
+    if issued:
+        _check_issuance(h, h_signed, registry, policy, reasons)
 
     # 3. duplication (idempotency claim state machine)
     key = h["idempotency_key"]
@@ -2209,6 +2371,10 @@ def check(packet, *, registry: dict | None, ledger_path: Path | None,
                 ledger[h["idempotency_key"]]["depends_on"] = list(h["depends_on"])
             if info.get("approvals_deferred"):
                 ledger[h["idempotency_key"]]["approvals_deferred"] = list(info["approvals_deferred"])
+            iug = h.get("issued_under_grant")
+            if isinstance(iug, dict):  # v0.7: which grant, and which of its issues, this task is
+                ledger[h["idempotency_key"]]["self_issued"] = {
+                    "template_id": (iug.get("grant") or {}).get("template_id"), "issue": iug.get("issue")}
             locked.dirty = True
             out = _result(ok, reasons, h, info)
             out["claim"] = {"epoch": epoch, "token": token}

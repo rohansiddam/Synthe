@@ -257,7 +257,7 @@ def test_uses_brief_agent_and_remote_are_checked(live):
 
 def test_a_broker_without_lane_grants_switched_on_says_how(live, tmp_path):
     cfg = json.loads((live["home"] / "broker" / "broker.json").read_text())
-    assert cfg["lane_templates"] == {"receivers": ["openclaw"]}     # setup switches it on
+    assert cfg["lane_templates"]["receivers"] == ["openclaw"]     # setup switches it on (and names its issuer)
     s = {**st.setup_of(live["home"]), "receiver": "builder"}
     with pytest.raises(SystemExit, match="aren't switched on for builder"):
         sg.plan(s, client=live["client"], **spec())

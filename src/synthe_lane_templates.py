@@ -26,6 +26,16 @@ outside a grant's path_scope is not the grant's to approve: it waits for a human
 
 `max_uses` and `expires_at` are optional: a signed grant that omits one has no such limit (a standing
 lane, valid until revoked or stale); one that carries a malformed value is refused.
+
+A grant may let its agent start work without a human-signed task (v0.7, `self_issue`, signed with the rest
+of the grant): the broker then issues tasks under it, signed by its own task issuer key (registry kind
+"task_issuer", held by the broker's OS user, never an agent's), each embedding the grant verbatim
+(SPEC section 16). `self_issue` names the issuer and may cap the tasks (max_tasks, max_open, max_per_hour:
+enforced only when present, like max_uses) and narrow them (task_hours, tools, max_purpose_chars,
+escalate_at). The issuer is never the receiver, the delegate or a trusted approver. In v1 a self-issue grant
+must send high-risk pushes to a human: it lists auto_approve without "high", or names a delegate
+(`self_issue_unreviewed`). Revoking or expiring the grant kills every task issued under it that hasn't
+landed, even one a human would approve. The issue store (self-issued.json) shares the lane lock.
 """
 import datetime as dt
 import hashlib
@@ -50,7 +60,11 @@ FIELDS = {"template_id", "approver", "kid", "receiver", "tool", "params", "path_
 # approves without a human (an allowlist: a tier it doesn't name, today's or a future one, goes to a human).
 # max_uses / expires_at: limits. Present, they are enforced as always; omitted from the signed grant, there
 # is no such limit (a standing lane, valid until revoked or stale). Present but malformed: refused.
-OPTIONAL = {"delegate", "brief", "auto_approve", "max_uses", "expires_at"}
+OPTIONAL = {"delegate", "brief", "auto_approve", "max_uses", "expires_at", "self_issue"}
+# self_issue: issuer (required); limits, enforced only when present; and narrowings of the issued tasks.
+SELF_ISSUE_FIELDS = {"issuer", "max_tasks", "max_open", "max_per_hour", "task_hours", "tools",
+                     "max_purpose_chars", "escalate_at"}
+MAX_PER_HOUR = 1000
 MAX_BRIEF = 4000
 MAX_USES = 10000
 # What new grants should carry (grant CLIs, Studio): routine and review-tier pushes go out without a human
@@ -73,7 +87,9 @@ def digest(x):
 
 
 def signing_input(x, revoke=False):
-    return (REVOKE_DOMAIN if revoke else DOMAIN) + sc.canonical_json({k: v for k, v in x.items() if k != "sig"})
+    if not revoke:  # the checker verifies the grant a self-issued task embeds with this same rule
+        return sc.approval_template_signing_input(x)
+    return REVOKE_DOMAIN + sc.canonical_json({k: v for k, v in x.items() if k != "sig"})
 
 
 def _sig(key, msg):
@@ -124,9 +140,62 @@ def lineage(cfg, registry, receiver, risk_aware=False):
     return out
 
 
-def auto_approves(t, tier):
+def auto_approves(t, tier, self_issued=False):
     """Whether grant `t` approves a push of this tier without a human. Not risk-aware: every tier, as before."""
-    return "auto_approve" not in t or tier in t["auto_approve"]
+    return tier in approved_tiers(t, self_issued)
+
+
+def approved_tiers(t, self_issued=False) -> list:
+    """The tiers grant `t` pushes without a human. For a self-issued task's push under
+    `self_issue.escalate_at: "review"`, review-tier pushes go to a human too."""
+    tiers = list(t["auto_approve"]) if "auto_approve" in t else list(synthe_risk.TIERS)
+    if self_issued and (t.get("self_issue") or {}).get("escalate_at") == "review":
+        tiers = [x for x in tiers if x == "routine"]
+    return tiers
+
+
+def issuer_config(cfg):
+    """This broker's task issuer, `lane_templates.self_issue` in broker.json ({"issuer", "key_file"}), or None.
+    It sits inside the grant lineage's effects digest, so changing it makes existing grants stale."""
+    c = (cfg.raw.get("lane_templates") or {}).get("self_issue")
+    ok = isinstance(c, dict) and isinstance(c.get("issuer"), str) and isinstance(c.get("key_file"), str)
+    return c if ok else None
+
+
+def _whole(v, lo, hi):
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _validate_self_issue(cfg, registry, x, policy):
+    si = x["self_issue"]
+    if not isinstance(si, dict) or "issuer" not in si or not set(si) <= SELF_ISSUE_FIELDS:
+        fail("template_malformed")
+    cap = si["max_tasks"] if _whole(si.get("max_tasks"), 1, MAX_USES) else MAX_USES
+    for k, hi in (("max_tasks", MAX_USES), ("max_open", cap), ("max_per_hour", MAX_PER_HOUR),
+                  ("max_purpose_chars", hc.SELF_ISSUE_MAX_PURPOSE_CHARS)):
+        if k in si and not _whole(si[k], 1, hi):
+            fail("template_malformed")
+    max_ttl = policy.get("max_ttl_hours")
+    if "task_hours" in si and (not hc._is_number(si["task_hours"]) or si["task_hours"] <= 0
+                               or (hc._is_number(max_ttl) and si["task_hours"] > max_ttl)):
+        fail("template_malformed")
+    if "tools" in si:
+        t, ceiling = si["tools"], policy.get("allowed_tools")
+        if not isinstance(t, list) or not t or any(not isinstance(v, str) or not v for v in t) \
+                or len(set(t)) != len(t) or "git_push" not in t or (ceiling is not None and set(t) - set(ceiling)):
+            fail("template_malformed")
+    if "escalate_at" in si and si["escalate_at"] not in ("review", "high"):
+        fail("template_malformed")
+    issuer, mine = si["issuer"], issuer_config(cfg)
+    entry = registry.get("agents", {}).get(issuer) if isinstance(issuer, str) else None
+    if not isinstance(entry, dict) or entry.get("kind") != hc.ISSUER_KIND or not sc.usable_keys(registry, issuer) \
+            or issuer in (x["receiver"], x.get("delegate")) or issuer in (policy.get("trusted_approvers") or []) \
+            or mine is None or mine["issuer"] != issuer:
+        fail("issuer_invalid")
+    # v1: no unreviewed self-issue. The agent picks, writes and lands its own work, so a high-risk push must
+    # reach a human: the grant is risk-aware and doesn't approve "high" alone, or it names a delegate.
+    if "delegate" not in x and ("auto_approve" not in x or "high" in x["auto_approve"]):
+        fail("self_issue_unreviewed")
 
 
 def enabled(cfg, receiver):
@@ -165,6 +234,8 @@ def validate(cfg, registry, x):
         entry = registry.get("agents", {}).get(d) if isinstance(d, str) else None
         if not isinstance(entry, dict) or entry.get("kind") != DELEGATE_KIND or d == x["receiver"]:
             fail("delegate_invalid")
+    if "self_issue" in x:
+        _validate_self_issue(cfg, registry, x, policy)
     # Ed25519 (passphrase key) or ES256 (Touch ID key): the registered key decides which.
     if not _verifies(registry, x, signing_input(x)):
         fail("template_signature_invalid")
@@ -335,6 +406,94 @@ def view(cfg):
             out.append({**{k: v for k, v in t.items() if k != "sig"}, "status": status,
                         "uses_left": max(0, t["max_uses"] - s["uses"].get(tid, 0)) if "max_uses" in t else None})
         return {"templates": out, "enabled_receivers": (cfg.raw.get("lane_templates") or {}).get("receivers", [])}
+
+
+# --------------------------------------------------------------------------
+# self-issued tasks (v0.7): the broker issues tasks under a grant that allows it (synthe_commit.issue_task)
+
+def issue_path(cfg):
+    return cfg.state_dir / "self-issued.json"
+
+
+def issue_load(cfg):
+    """{"grants": {template_id: {"issued": n, "recent": [issued_at...], "tasks": {"n": record}}},
+    "requests": {request_id: {"template_id", "issue", "body_sha256"}}}. Caller holds locked(cfg) to write."""
+    p = issue_path(cfg)
+    if not p.exists():
+        return {"grants": {}, "requests": {}}
+    try:
+        s = json.loads(p.read_text())
+        if set(s) != {"grants", "requests"} or not all(isinstance(v, dict) for v in s.values()):
+            raise ValueError()
+        if any(not isinstance(g, dict) or not _whole(g.get("issued"), 0, 10**9) or not isinstance(g.get("tasks"), dict)
+               or not isinstance(g.get("recent"), list) for g in s["grants"].values()):
+            raise ValueError()
+        return s
+    except (OSError, ValueError, TypeError):
+        fail("template_store_corrupt")
+
+
+def issue_save(cfg, s):
+    save(cfg, s, issue_path(cfg))
+
+
+def issue_record(cfg, template_id, issue):
+    """The broker's record of one issued task, or None."""
+    g = issue_load(cfg)["grants"].get(template_id) if isinstance(template_id, str) else None
+    return (g or {}).get("tasks", {}).get(str(issue)) if g else None
+
+
+def check_issued(cfg, registry, h):
+    """A self-issued handoff's standing at the broker, or Deny: its grant is the one in the store, byte for
+    byte, still valid (signature, expiry, lineage), not revoked, and the broker issued exactly this packet.
+    Run at claim, at propose, for staged retries, and again under the lane lock at dispatch: revoking or
+    expiring the grant kills the task even under a human's approval (the human can sign a task instead).
+    Returns (grant, issue record)."""
+    iug = h.get("issued_under_grant") if isinstance(h, dict) else None
+    g = iug.get("grant") if isinstance(iug, dict) else None
+    tid = g.get("template_id") if isinstance(g, dict) else None
+    s = load(cfg)
+    t = s["templates"].get(tid) if isinstance(tid, str) else None
+    if t is None or t != g:
+        fail("template_unavailable")
+    if tid in s["revoked"]:
+        fail("template_revoked")
+    validate(cfg, registry, t)
+    rec = issue_record(cfg, tid, iug.get("issue"))
+    if not isinstance(rec, dict) or rec.get("packet_sha256") != hc.handoff_digest(h):
+        fail("self_issue_unknown")
+    return t, rec
+
+
+def select_self_issue(cfg, registry, receiver, branch, owned_paths, remote=None, template_id=None):
+    """The grant to issue a task under: a live grant for this receiver with `self_issue` whose branch pattern,
+    remote and paths cover the request (the first by id, as select() picks). `template_id` pins one."""
+    from synthe_commit import Deny
+    s = load(cfg)
+    if template_id is not None and "self_issue" not in (s["templates"].get(template_id) or {}):
+        fail("self_issue_not_granted")
+    live = []
+    for tid, t in sorted(s["templates"].items()):
+        if (template_id and tid != template_id) or t.get("receiver") != receiver or "self_issue" not in t:
+            continue
+        try:
+            validate(cfg, registry, t)
+            if tid in s["revoked"]:
+                fail("template_revoked")
+            if exhausted(s, t):
+                fail("template_exhausted")
+            live.append(t)
+        except Deny:
+            if template_id:
+                raise
+    if not live:
+        fail("self_issue_not_granted")
+    for t in live:
+        if (remote or t["params"]["remote"]) == t["params"]["remote"] \
+                and hc.glob_match(t["params"]["branch_pattern"], branch) \
+                and all(any(hc._glob_covers(p, o) for p in t["path_scope"]) for o in owned_paths or t["path_scope"]):
+            return t
+    fail("self_issue_scope")
 
 
 # --------------------------------------------------------------------------

@@ -30,7 +30,12 @@ Protocol: one JSON request line, one JSON response line, per connection.
   request  {"op": "...", "args": {...}, "auth": "<token, tcp only>"}
   response {"ok": true, "result": ...} | {"ok": false, "error": {"code", "message"}}
 Ops: hello, claim, complete, policy, bundle_bases, propose, receipts, and
-(v0.5) submit_approval, staged, read_file, list_files; (v0.7) submit_task.
+(v0.5) submit_approval, staged, read_file, list_files; (v0.7) submit_task, issue_task.
+
+Self-issued tasks (v0.7): `issue_task` asks the broker for a task under a lane grant that allows it
+(`self_issue`): the broker signs it with its task issuer key, which lives here next to the broker key,
+and receipts the decision. `git push` with no human-signed task for the branch does this through
+git-remote-synthe, then claims and proposes as usual.
 
 Speculative commit (v0.5): `claim` and `propose` take "wait_for_approval":
 true. The claim then succeeds while the approval of a broker-mediated effect
@@ -140,6 +145,9 @@ def isolation_problems(cfg: cm.BrokerConfig) -> list:
                 return
 
     secret(cfg.key_path, "broker key", "broker_key_exposed")
+    issuer = (cfg.raw.get("lane_templates") or {}).get("self_issue")
+    if isinstance(issuer, dict) and isinstance(issuer.get("key_file"), str):  # v0.7: signs self-issued tasks
+        secret(cfg.rel(issuer["key_file"]), "task issuer key", "broker_key_exposed")
     for name, remote in ((cfg.effects.get("git_push") or {}).get("remotes") or {}).items():
         for label, r in ((f"remote '{name}'", remote), (f"the fetch_from source of '{name}'", remote.get("fetch_from"))):
             if isinstance(r, dict) and r.get("token_file"):
@@ -152,6 +160,7 @@ def isolation_problems(cfg: cm.BrokerConfig) -> list:
     guarded(cfg.approvals_path, "detached approvals")
     guarded(cfg.state_dir / "lane-templates.json", "lane templates")
     guarded(cfg.state_dir / "delegate-approvals.json", "delegate approvals")
+    guarded(cfg.state_dir / "self-issued.json", "self-issued tasks")
     if cfg.staged_path.exists():  # holds the claim tokens of staged proposals
         secret(cfg.staged_path, "staged proposals", "broker_credentials_exposed")
     return out
@@ -247,6 +256,13 @@ class Broker:
         packet = args.get("packet")
         h = packet.get("handoff") if isinstance(packet, dict) else None
         extra, defer = (), None
+        if isinstance(h, dict) and "issued_under_grant" in h:
+            # v0.7: a self-issued task claims only while its grant is live and the broker issued exactly it.
+            import synthe_lane_templates as lanes
+            try:
+                lanes.check_issued(self.cfg, registry, h)
+            except cm.Deny as d:
+                return hc._reject(d.reason["state"], d.reason["code"], d.reason["message"])
         if isinstance(h, dict):
             extra = cm.load_approvals(self.cfg, h)
             if args.get("wait_for_approval") is True:
@@ -371,6 +387,8 @@ class Broker:
         out = {"lineage": lanes.lineage(self.cfg, registry, receiver, risk_aware=auto is not None),
                "auto_approve_default": lanes.default_auto_approve(args.get("delegate")),
                "risk_rules": lanes.risk_rules(self.cfg)}
+        issuer = lanes.issuer_config(self.cfg)  # v0.7: what a grant's `self_issue.issuer` must name here
+        out["self_issue_default"] = {"issuer": issuer["issuer"]} if issuer else None
         if auto is not None:
             out["auto_approve"] = list(auto)
         return out
@@ -383,7 +401,25 @@ class Broker:
 
     def op_revoke_lane_template(self, args, isolation):
         import synthe_lane_templates as lanes
-        return lanes.revoke(self.cfg, args.get("revocation") or {})
+        out = lanes.revoke(self.cfg, args.get("revocation") or {})
+        # v0.7: the grant's self-issued tasks die with it; a staged one is denied now, with a receipt.
+        cm.retry_staged(self.cfg, sweep=True)
+        return out
+
+    def op_issue_task(self, args, isolation):
+        """(v0.7) A task under a lane grant that allows self-issue, for this broker's receiver: signed by the
+        broker's task issuer key and receipted (task_issued / task_issue_refused). Replaying a request_id
+        returns the same task. With "claim": true the broker then claims it (a separate step: the claim
+        stays the one admission path) and returns the claim under "claim"."""
+        claim = args.get("claim") is True
+        request = {k: v for k, v in args.items() if k != "claim"}
+        problem = cm.issue_request_problem(request)
+        if problem:
+            raise Refused("request_malformed", problem)
+        out = cm.issue_task(self.cfg, request, origin={"isolation": isolation, "via": self.transport})
+        if claim and out.get("decision") == "task_issued":
+            out["claim"] = self.op_claim({"packet": out["packet"], "wait_for_approval": True}, isolation)
+        return out
 
     def op_submit_approval(self, args, isolation):
         """A human's detached approval (synthe_sign.py approve --detached). It is
@@ -442,38 +478,12 @@ class Broker:
         if not isinstance(sender, dict) or sender.get("kind") != "human":
             raise Refused("task_sender_not_human", "submitted tasks must be signed by a registered human")
 
-        tasks = self.cfg.workspace / "tasks"
-        if tasks.is_symlink():
-            raise Refused("task_path_invalid", "the workspace tasks directory must not be a symlink")
-        tasks.mkdir(parents=True, exist_ok=True)
-        # The broker runs with umask 077 (the LaunchDaemon's), so set the modes: the agent must read its task.
-        if tasks.stat().st_uid == self.uid:
-            os.chmod(tasks, 0o755)
+        try:  # the same file rules as a self-issued task's (cm.write_task_file)
+            created = cm.write_task_file(self.cfg, rel, raw)
+        except cm.Deny as d:
+            raise Refused(d.reason["code"], d.reason["message"])
         target = hc.resolve_in_workspace(self.cfg.workspace, rel)
-        if target is None or target.parent != tasks.resolve() or target.is_symlink():
-            raise Refused("task_path_invalid", "task artifact path escapes the broker workspace")
-
-        created = False
         try:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            try:
-                fd = os.open(target, flags, 0o644)
-            except FileExistsError:
-                if target.is_symlink() or not target.is_file():
-                    raise Refused("task_conflict", "the task path exists but is not a regular file")
-                st = target.stat()
-                if st.st_uid != self.uid or st.st_mode & 0o022:
-                    raise Refused("task_conflict", "the existing task is not broker-owned and read-only to clients")
-                if not hmac.compare_digest(target.read_bytes(), raw):
-                    raise Refused("task_conflict", "the task path already holds different content")
-            else:
-                created = True
-                os.fchmod(fd, 0o644)
-                with os.fdopen(fd, "wb") as fh:
-                    fh.write(raw)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-
             extra = cm.load_approvals(self.cfg, h)
             defer = {a.get("name") for a in h.get("planned_actions") or []
                      if isinstance(a, dict) and a.get("tool") in self.cfg.effects}
@@ -689,5 +699,25 @@ def doctor(cfg: cm.BrokerConfig) -> int:
     problems = isolation_problems(cfg)
     print(json.dumps({"broker_uid": os.geteuid(), "isolation": cfg.isolation["mode"],
                       "ok": not problems,
-                      "problems": [{"code": c, "message": m} for c, m in problems]}, indent=2))
+                      "problems": [{"code": c, "message": m} for c, m in problems],
+                      "warnings": sender_warnings(cfg)}, indent=2))
     return 0 if not problems else 2
+
+
+def sender_warnings(cfg: cm.BrokerConfig) -> list:
+    """(v0.7) A receiver with no `trusted_senders` accepts a task signed by any registered key: with a
+    delegate's, the broker's or the task issuer's key on record too, a task need not come from a human.
+    Advice, not a refusal: registries from before the ceiling keep working as they did."""
+    registry, err = hc.load_registry(str(cfg.registry_path), allow_unsigned=True)
+    if err:
+        return []
+    agents = registry.get("agents") or {}
+    keyed = [n for n, a in agents.items() if isinstance(a, dict) and a.get("keys")]
+    out = []
+    for name in sorted(agents):
+        policy = hc.receiver_policy(registry, name) or {}
+        if (agents[name] or {}).get("kind") == "agent" and "trusted_senders" not in policy and len(keyed) > 1:
+            out.append({"code": "sender_ceiling_missing",
+                        "message": f"receiver {name!r} has no trusted_senders, so any of {len(keyed)} registered keys "
+                                   f"may sign it a task; list the humans who may (SPEC section 4)"})
+    return out

@@ -13,7 +13,8 @@
 `setup` writes, under --home (default ~/.synthe):
   approver.key.json   your approver key, sealed under a passphrase you type (never plaintext)
   approver.pub.json   its public half
-  broker/             the commit broker: its key, broker.json, registry.json and the GitHub token
+  broker/             the commit broker: its keys (the broker's, and the task issuer's that signs tasks it
+                      issues under a lane grant), broker.json, registry.json and the GitHub token
                       (moved there, 0600; never printed, never put in argv)
   setup-report.json   what was set up and every check, with no secrets in it
 and wires OpenClaw: the Synthe MCP server (without the approval tool: the agent never approves), the
@@ -49,6 +50,9 @@ import synthe_ui as sui  # noqa: E402
 import synthe_sign as ss  # noqa: E402
 
 BROKER_ID = "synthe-broker"
+# v0.7: signs the tasks the broker issues under a lane grant that allows self-issue. Its own key, held by
+# the broker's OS user next to the broker key (never the agent's), registered as kind "task_issuer".
+ISSUER_ID = "synthe-issuer"
 MCP_NAME = "synthe-local"
 PLUGIN_ID = "synthe-barrier"
 FORBIDDEN_PATHS = [".github/**", "**/*.key.json", "**/.env", "**/*.pem"]
@@ -140,14 +144,22 @@ def _check_scope(branches: list, allowed_paths: list) -> None:
         raise SystemExit("--allowed-paths: give at least one glob, e.g. 'src/**'")
 
 
+def issuer_entry(pub: dict) -> dict:
+    return {"role": "task issuer (signs tasks the broker issues under a lane grant)", "kind": "task_issuer",
+            "keys": [pub]}
+
+
 def build_registry(approver: str, approver_pub: dict, agent: str, allowed_paths: list,
-                   broker_pub: dict | None = None) -> dict:
-    """You (approver and sender), the agent (receiver, fail-closed policy) and, once known, the broker."""
+                   broker_pub: dict | None = None, issuer_pub: dict | None = None) -> dict:
+    """You (approver and sender), the agent (receiver, fail-closed policy) and, once known, the broker and its
+    task issuer. Only you sign the agent's tasks (trusted_senders); the issuer's are admitted only as tasks
+    issued under a lane grant you signed."""
     agents = {approver: {"role": "approver and sender", "kind": "human", "keys": [approver_pub]},
               agent: {"role": "receiver", "kind": "agent", "keys": [], "policy": {
                   "allowed_tools": ["read_repo", "edit_files", "run_tests", "git_push"],
                   "forbidden": ["force_push"], "approval_required_for": ["git_push"],
-                  "trusted_approvers": [approver], "budget": {"tokens": 500000, "usd": 25, "minutes": 240},
+                  "trusted_approvers": [approver], "trusted_senders": [approver],
+                  "budget": {"tokens": 500000, "usd": 25, "minutes": 240},
                   "require_signatures": True, "require_signed_approvals": True, "require_planned_actions": True,
                   "max_ttl_hours": DEFAULT_MAX_TTL_HOURS,
                   "allowed_paths": allowed_paths, "forbidden_paths": FORBIDDEN_PATHS,
@@ -155,7 +167,18 @@ def build_registry(approver: str, approver_pub: dict, agent: str, allowed_paths:
                                "budget": {"tokens": 200000, "usd": 10, "minutes": 120}}}}}
     if broker_pub is not None:
         agents[BROKER_ID] = {"role": "commit broker", "kind": "service", "keys": [broker_pub]}
+    if issuer_pub is not None:
+        agents[ISSUER_ID] = issuer_entry(issuer_pub)
     return {"agents": agents}
+
+
+def self_issue_config() -> dict:
+    """broker.json's lane_templates.self_issue: which identity signs issued tasks, and its key file."""
+    return {"issuer": ISSUER_ID, "key_file": f"keys/{ISSUER_ID}.key.json"}
+
+
+def _public(key: dict) -> dict:
+    return {"kid": key["kid"], "alg": sc.ALG, "public_key": sc.b64u(sc.public_key(sc.unb64u(key["private_key"])))}
 
 
 def write_setup(home: Path, info: dict) -> None:
@@ -193,6 +216,8 @@ def write_broker(home: Path, *, repo_url: str, branches: list, allowed_paths: li
     kid = f"{BROKER_ID}-1"
     _write_private(b / "keys" / f"{BROKER_ID}.key.json",
                    json.dumps({"agent": BROKER_ID, "kid": kid, "alg": sc.ALG, "private_key": sc.b64u(secret)}, indent=2) + "\n")
+    issuer = {"agent": ISSUER_ID, "kid": f"{ISSUER_ID}-1", "alg": sc.ALG, "private_key": sc.b64u(sc.generate_secret())}
+    _write_private(b / "keys" / f"{ISSUER_ID}.key.json", json.dumps(issuer, indent=2) + "\n")
     remote = {"url": repo_url, "branches": branches, **readable(branches)}
     if token_file is not None:
         token = token_file.expanduser().read_text().strip()
@@ -204,13 +229,15 @@ def write_broker(home: Path, *, repo_url: str, branches: list, allowed_paths: li
               "key": f"keys/{BROKER_ID}.key.json", "registry": "registry.json",
               "ledger": "ledger.sqlite3", "receipts": "receipts.jsonl", "workspace": "workspace", "state_dir": "state",
               "source_roots": [], "isolation": {"mode": isolation},
-              "lane_templates": {"receivers": [agent]},   # lets you sign a lane grant; with none signed, nothing changes
+              # lets you sign a lane grant (with none signed, nothing changes); one that allows self-issue lets
+              # the broker issue tasks under it, signed by its task issuer key
+              "lane_templates": {"receivers": [agent], "self_issue": self_issue_config()},
               "effects": {"git_push": {"max_commits": 200, "require_approval_commit_pin": True,
                                        "remotes": {"origin": remote}}}}
     (b / "broker.json").write_text(json.dumps(config, indent=2) + "\n")
     broker_pub = {"kid": kid, "alg": sc.ALG, "public_key": sc.b64u(sc.public_key(secret))}
     (b / "registry.json").write_text(json.dumps(build_registry(approver, approver_pub, agent, allowed_paths,
-                                                               broker_pub), indent=2) + "\n")
+                                                               broker_pub, _public(issuer)), indent=2) + "\n")
     write_setup(home, {"mode": "dev", "broker": f"unix://{home / 'broker.sock'}", "registry": str(b / "registry.json"),
                        "broker_config": str(b / "broker.json"), "workspace": str(b / "workspace"),
                        "remote": {"url": repo_url, "branches": branches}, "receiver": agent})
@@ -546,6 +573,10 @@ def apply_config(state: Path, stage: Path) -> dict:
                   "public_key": sc.b64u(sc.public_key(sc.unb64u(key["private_key"])))}
     registry = json.loads((stage / "registry.json").read_text())
     registry["agents"][BROKER_ID] = {"role": "commit broker", "kind": "service", "keys": [broker_pub]}
+    # v0.7: the task issuer key `synthe_commit.py init` made as the broker's user; its public half from the file
+    issuer_key = state / "keys" / f"{ISSUER_ID}.key.json"
+    if issuer_key.exists():
+        registry["agents"][ISSUER_ID] = issuer_entry(_public(json.loads(issuer_key.read_text())))
     patch = json.loads((stage / "config-patch.json").read_text())
     if (cfg.get("isolation") or {}).get("mode") != "user":
         raise SystemExit(f"{cfg_path}: isolation mode is not 'user'; refusing to change it")
@@ -559,6 +590,8 @@ def apply_config(state: Path, stage: Path) -> dict:
     cfg["workspace"] = patch["workspace"]
     cfg["receiver"] = patch["receiver"]
     cfg.setdefault("lane_templates", {"receivers": [patch["receiver"]]})  # as write_broker: grants only exist once you sign one
+    if issuer_key.exists():
+        cfg["lane_templates"].setdefault("self_issue", self_issue_config())
     cfg["ledger"] = "ledger.sqlite3"
     git_push = cfg.setdefault("effects", {}).setdefault("git_push", {})
     git_push.update({"max_commits": 200, "require_approval_commit_pin": True, "remotes": {"origin": patch["remote"]}})
@@ -575,6 +608,9 @@ def apply_registry(state: Path, stage: Path) -> dict:
     registry.setdefault("agents", {})[BROKER_ID] = {
         "role": "commit broker", "kind": "service",
         "keys": [{"kid": key["kid"], "alg": sc.ALG, "public_key": sc.b64u(sc.public_key(sc.unb64u(key["private_key"])))}]}
+    issuer_key = state / "keys" / f"{ISSUER_ID}.key.json"
+    if issuer_key.exists():  # likewise the task issuer's (v0.7), when the broker has one
+        registry["agents"][ISSUER_ID] = issuer_entry(_public(json.loads(issuer_key.read_text())))
     _write_private(state / "registry.json", json.dumps(registry, indent=2) + "\n")
     return {"approval_keys": {n: [k.get("kid") for k in a.get("keys", [])] for n, a in registry["agents"].items()
                               if a.get("kind") == "human"}}

@@ -109,8 +109,22 @@ def plan_for(packet, registry: dict | None, ledger: dict | None, mediated_tools=
     for key in h.get("depends_on") or []:
         dep = ledger.get(key)
         depends.append({"key": key, "state": hc.entry_state(dep) if isinstance(dep, dict) else "UNKNOWN"})
+    # v0.7: who wrote the purpose. A self-issued task's was written by this same agent, so the plan also
+    # carries the human's own words for the lane (the grant's signed `brief`), re-read at every step.
+    iug = h.get("issued_under_grant")
+    grant = iug.get("grant") if isinstance(iug, dict) and isinstance(iug.get("grant"), dict) else None
+    if grant is not None:
+        origin = {"kind": "self_issued", "template_id": grant.get("template_id"), "issue": iug.get("issue"),
+                  "granted_by": grant.get("approver")}
+        author = h.get("to")
+    else:
+        origin, author = {"kind": "signed", "sender": h.get("from")}, h.get("from")
+    extra = {"brief": grant["brief"]} if grant is not None and isinstance(grant.get("brief"), str) else {}
     return {
         "purpose": h.get("purpose"),
+        "purpose_author": author,
+        "task_origin": origin,
+        **extra,
         "handoff": {k: h.get(k) for k in ("id", "idempotency_key", "trace_id", "from", "to")},
         "claim_state": claim_state,
         "planned_actions": actions,

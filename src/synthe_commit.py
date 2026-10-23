@@ -25,7 +25,7 @@ branch B of remote R"), and the broker, which alone holds the credentials:
 Supported effects: git_push. (send_email is next; see docs/COMMIT.md.)
 
 Commands:
-  init       --dir DIR [--broker-id ID]    broker key + config skeleton
+  init       --dir DIR [--broker-id ID]    broker key, task issuer key + config skeleton
   serve      --config CFG --socket PATH    the broker daemon, run as its own OS
              (or --listen HOST:PORT)       user; agents use synthe_client.py
   doctor     --config CFG                  are the key, tokens and state private?
@@ -1370,16 +1370,30 @@ class LaneEscalated(Deny):
         self.fields = fields
 
 
+def _issued_lane(cfg: BrokerConfig, registry: dict, h: dict, params: dict):
+    """The lane a self-issued task's push goes through: always the grant it was issued under, never another
+    one. None when that grant can't approve this push now (its uses spent, say): a human still may. Whether
+    the task itself is still alive is lanes.check_issued's call (revoked, expired, stale: dead)."""
+    import synthe_lane_templates as lanes
+    iug = h.get("issued_under_grant") if isinstance(h.get("issued_under_grant"), dict) else {}
+    tid = (iug.get("grant") or {}).get("template_id") if isinstance(iug.get("grant"), dict) else None
+    try:
+        return lanes.select(cfg, registry, h.get("to"), params, template_id=tid) if isinstance(tid, str) else None
+    except Deny:
+        return None
+
+
 def _risk_message(risk: dict) -> str:
     return (f"needs a human: a {risk['tier']}-risk push ({'; '.join(risk['reasons'][:3])}); grant "
             f"'{risk['template_id']}' approves only {' and '.join(risk['auto_approve'])} pushes without one")
 
 
-def _lane_escalation(cfg: BrokerConfig, eff, grant: dict, paths: list, base: str, commit: str):
+def _lane_escalation(cfg: BrokerConfig, eff, grant: dict, paths: list, base: str, commit: str,
+                     self_issued: bool = False):
     """(LaneEscalated or None, receipt fields) for pushing `commit` over `base` under `grant`. Paths outside
     the grant's path_scope go to a human (a push the lane doesn't cover is treated like any other push; the
     receiver policy and forbidden_paths were checked before this and still deny outright). Then, for a
-    risk-aware grant, the risk tier."""
+    risk-aware grant, the risk tier (for a self-issued task, under the grant's self_issue.escalate_at too)."""
     outside = [p for p in paths if not any_match(grant["path_scope"], p)]
     if outside:
         scope = {"template_id": grant["template_id"], "path_scope": list(grant["path_scope"]),
@@ -1389,24 +1403,27 @@ def _lane_escalation(cfg: BrokerConfig, eff, grant: dict, paths: list, base: str
         return LaneEscalated("outside_lane_paths", f"needs a human: {len(outside)} path(s) outside grant "
                                                    f"'{grant['template_id']}' ({shown})", {"lane_scope": scope}), \
             {"lane_scope": scope}
-    if "auto_approve" not in grant:
-        return None, {}
-    risk = _lane_risk(cfg, eff, grant, base, commit)
+    import synthe_lane_templates as lanes
+    if "auto_approve" not in grant and lanes.approved_tiers(grant, self_issued) == list(synthe_risk.TIERS):
+        return None, {}  # not risk-aware: it approves every tier, as before
+    risk = _lane_risk(cfg, eff, grant, base, commit, self_issued)
     esc = LaneEscalated("risk_escalated", _risk_message(risk), {"risk": risk}) if risk["escalated"] else None
     return esc, {"risk": risk}
 
 
-def _lane_risk(cfg: BrokerConfig, eff, grant: dict, base: str, commit: str) -> dict:
+def _lane_risk(cfg: BrokerConfig, eff, grant: dict, base: str, commit: str, self_issued: bool = False) -> dict:
     """The broker's own classification (synthe_risk) of pushing `commit` over `base` under a risk-aware
-    grant: every path of every commit in the range, from its mirror, never the agent's description. Paths
-    and counts only, never file contents. `escalated`: the grant doesn't list this tier."""
+    grant: every path of every commit in the range, from its mirror, never the agent's description (nor,
+    for a self-issued task, the purpose the agent wrote). Paths and counts only, never file contents.
+    `escalated`: the grant doesn't list this tier."""
     import synthe_lane_templates as lanes
     rules = lanes.risk_rules(cfg)
     found = synthe_risk.assess_change(eff.describe(commit, base), rules)
+    tiers = lanes.approved_tiers(grant, self_issued)
     return {"tier": found["tier"], "reasons": found["reasons"], "paths": found["paths"],
-            "sensitive_paths": found["sensitive_paths"], "auto_approve": list(grant["auto_approve"]),
+            "sensitive_paths": found["sensitive_paths"], "auto_approve": tiers,
             "template_id": grant["template_id"], "commit": commit, "base": base,
-            "rules_digest": synthe_risk.rules_digest(rules), "escalated": not lanes.auto_approves(grant, found["tier"])}
+            "rules_digest": synthe_risk.rules_digest(rules), "escalated": found["tier"] not in tiers}
 
 
 # --------------------------------------------------------------------------
@@ -1535,6 +1552,14 @@ def staged_detail(cfg: BrokerConfig, staged_id: str, max_patch: int = 200_000) -
     # that name no budget of their own.
     registry, rerr = hc.load_registry(str(cfg.registry_path))
     if not rerr:
+        # v0.7: who wrote the task, from the signed packet the broker staged and the registry, never its
+        # text; for a self-issued one, also the human's own brief from the grant it embeds.
+        out["task_origin"] = task_origin(cfg, registry, h)
+        iug = h.get("issued_under_grant")
+        g = iug.get("grant") if isinstance(iug, dict) else None
+        brief = g.get("brief") if isinstance(g, dict) else None
+        if isinstance(brief, str):
+            out["lane_brief"] = brief
         h_eff = copy.deepcopy(h)
         hc.apply_receiver_defaults(h_eff, hc.receiver_policy(registry, h.get("to")))
         eff_budget = (h_eff.get("authority") or {}).get("budget")
@@ -1619,6 +1644,8 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
     def finish(decision, reasons=None, **fields):
         reasons = [{**r, "message": str(r.get("message", ""))} for r in reasons or []]
         receipt.update(decision=decision, reasons=reasons, **fields)
+        if ctx.get("origin") is not None:  # v0.7: who wrote the task, once its signature checked out
+            receipt["task_origin"] = ctx["origin"]
         if ctx.get("registry") is not None:
             receipt["plan"] = sp.plan_for(ctx["packet"], ctx["registry"], hc.load_ledger(cfg.ledger_path),
                                           tuple(cfg.effects), current=(ctx["action"], decision),
@@ -1677,7 +1704,9 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
         # 2. authority at commit time: the whole handoff re-validated now. The
         #    other mediated effects' approvals are checked when they commit.
         import synthe_lane_templates as lanes
-        lane = lanes.select(cfg, registry, h.get("to"), params) if etype == "git_push" else None
+        issued = "issued_under_grant" in h  # v0.7: a self-issued task; its lane is the grant it was issued under
+        lane = (_issued_lane(cfg, registry, h, params) if issued else lanes.select(cfg, registry, h.get("to"), params)) \
+            if etype == "git_push" else None
         at = hc.now_utc()
         info: dict = {}
         mediated = [a.get("name") for a in h.get("planned_actions") or []
@@ -1691,6 +1720,10 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
             if not _approval_only(reasons, info, action):
                 raise _DenyMany(reasons)
             pending = list(reasons)
+        if info.get("signature") == "verified":
+            ctx["origin"] = task_origin(cfg, registry, h)
+        if issued:  # its grant revoked, expired or stale, or not the broker's issue: the task is dead
+            lanes.check_issued(cfg, registry, h)
 
         # 3. a trusted human approved exactly this effect (in the packet, or detached); under a grant that
         #    names a delegate, otherwise the delegate approved this exact commit. A grant without a delegate
@@ -1767,7 +1800,8 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
         if pending:  # a grant still in play also says now whether it covers the push (who is asked meanwhile)
             return _stage(cfg, finish, packet, h, token, action, params, prep, eff, scope, pending, origin,
                           receipt["commits_from"], fingerprint, _staged, human_gap=human_gap,
-                          classify=(lambda paths, base, commit: _lane_escalation(cfg, eff, lane, paths, base, commit))
+                          classify=(lambda paths, base, commit: _lane_escalation(cfg, eff, lane, paths, base, commit,
+                                                                                 issued))
                           if lane else None)
 
         # 5. inside the claim fence: live check, effect, observe, receipt
@@ -1777,8 +1811,9 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
                 laps.lap("fence")  # the ledger lock, the claim and dependency checks
                 receipt["claim"] = {"epoch": record["epoch"]}
                 # Revalidate and reserve under the shared lane lock at dispatch.
-                # Revocation cannot race a push after returning successfully.
-                if lane:
+                # Revocation cannot race a push after returning successfully. A self-issued task is
+                # re-checked against its grant here too, even under a human's approval.
+                if lane or issued:
                     def authorize(paths, pushing):
                         # Signed registry: enforced once a genesis key is pinned
                         # (SYNTHE_REGISTRY_GENESIS_KEY or registry-genesis.key); unsigned otherwise
@@ -1791,10 +1826,15 @@ def propose(cfg: BrokerConfig, proposal, origin: dict | None = None, bundle: byt
                                                   as_receiver=cfg.receiver_id)
                         if not valid:
                             raise _DenyMany(why)
+                        if issued:
+                            lanes.check_issued(cfg, current_registry, h)
+                        if not lane:
+                            return
                         # Does the grant cover the exact range being pushed, now (its paths; for a risk-aware
                         # grant, its tier)? A restaged commit is judged anew.
                         grant = lanes.select(cfg, current_registry, h.get("to"), params, template_id=lane["template_id"])
-                        escalation, seen = _lane_escalation(cfg, eff, grant, paths, pushing["base"], pushing["commit"])
+                        escalation, seen = _lane_escalation(cfg, eff, grant, paths, pushing["base"], pushing["commit"],
+                                                            issued)
                         receipt.update(seen)
                         if escalation:  # before the delegate is asked, before a use is spent
                             raise escalation
@@ -1961,7 +2001,14 @@ def _staged_ready(cfg: BrokerConfig, rec: dict) -> bool:
     mediated = {a.get("name") for a in h.get("planned_actions") or []
                 if isinstance(a, dict) and a.get("tool") in cfg.effects}
     import synthe_lane_templates as lanes
-    lane = lanes.select(cfg, registry, h.get("to"), rec["params"]) if etype == "git_push" else None
+    issued = "issued_under_grant" in h
+    if issued:  # a self-issued task whose grant was revoked or expired: commit it now, to deny it
+        try:
+            lanes.check_issued(cfg, registry, h)
+        except Deny:
+            return True
+    lane = (_issued_lane(cfg, registry, h, rec["params"]) if issued
+            else lanes.select(cfg, registry, h.get("to"), rec["params"])) if etype == "git_push" else None
     info: dict = {}
     at = hc.now_utc()
     ok, reasons = hc.validate(packet, registry=registry, ledger={}, workspace=cfg.workspace, at=at, info=info,
@@ -2089,6 +2136,9 @@ def submit_approval(cfg: BrokerConfig, approval, origin: dict | None = None) -> 
     registry, err = hc.load_registry(str(cfg.registry_path), allow_unsigned=True)
     if err:
         return {"receipt": finish("approval_rejected", err["reasons"]), "commits": []}
+    origin_of_task = _origin_for_key(cfg, registry, a["idempotency_key"], a["from"])
+    if origin_of_task:  # v0.7: who wrote the task this approval is for (the broker's record, not the approval)
+        receipt["task_origin"] = origin_of_task
     if a["to"] not in (registry.get("agents") or {}):
         return {"receipt": finish("approval_rejected", [{
             "state": "invalid", "code": "unknown_agent:to", "message": f"no receiver '{a['to']}' in the registry"}]),
@@ -2144,6 +2194,9 @@ def submit_delegate(cfg: BrokerConfig, doc, origin: dict | None = None, escalate
     registry, err = hc.load_registry(str(cfg.registry_path), allow_unsigned=True)
     if err:
         return {"receipt": finish(rejected, err["reasons"]), "commits": []}
+    origin_of_task = _origin_for_key(cfg, registry, x.get("idempotency_key"), x.get("from"))
+    if origin_of_task:  # v0.7: who wrote the task under review (the broker's record of it)
+        receipt["task_origin"] = origin_of_task
     staged = None
     if not escalate and isinstance(x.get("idempotency_key"), str) and isinstance(x.get("action"), str):
         with _staged_store(cfg) as box:  # a snapshot, released before the lane lock (no lock is ever nested)
@@ -2183,15 +2236,364 @@ def delegate_grant(cfg: BrokerConfig, staged_id) -> dict:
         raise Deny("invalid", err["reasons"][0]["code"], err["reasons"][0]["message"])
     h = rec["packet"]["handoff"]
     plan = [a for a in h.get("planned_actions") or [] if isinstance(a, dict) and a.get("name") == action]
-    t = lanes.select(cfg, registry, h.get("to"), rec.get("params") or {}) \
-        if plan and plan[0].get("tool") == "git_push" else None
+    if not plan or plan[0].get("tool") != "git_push":
+        t = None
+    elif "issued_under_grant" in h:  # a self-issued task: only the grant it was issued under
+        t = _issued_lane(cfg, registry, h, rec.get("params") or {})
+    else:
+        t = lanes.select(cfg, registry, h.get("to"), rec.get("params") or {})
     t = t or {}
     return {"id": staged_id, "state": rec.get("state"), "template_id": t.get("template_id"),
+            # who wrote the task (v0.7): a self-issued one was written by the agent whose diff this is
+            "task_origin": task_origin(cfg, registry, h),
             "delegate": t.get("delegate"), "granted_by": t.get("approver"),
             # the human's own words to the reviewer, signed with the grant, and the limits it signed
             "brief": t.get("brief"),
             "limits": {k: t.get(k) for k in ("params", "path_scope", "max_uses", "expires_at", "auto_approve")}
             if t else None, "decisions": lanes.delegate_view(cfg, staged_id)}
+
+
+# --------------------------------------------------------------------------
+# self-issued tasks (v0.7): the broker issues a task under a lane grant that allows it (SPEC section 16)
+
+ISSUE_REQUEST_FIELDS = {"request_id", "branch", "purpose", "owned_paths", "depends_on", "template_id", "remote"}
+_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+ISSUED_PUSH = "push_branch"
+
+
+def write_task_file(cfg: BrokerConfig, rel: str, raw: bytes) -> bool:
+    """Install one task file in the broker workspace's tasks/ directory, readable by the agent (0644).
+    Created exclusively and never through a symlink; a file already there must be broker-owned, read-only
+    to others and byte-identical. Returns whether it was created; Deny (task_path_invalid, task_conflict)."""
+    tasks = cfg.workspace / "tasks"
+    if tasks.is_symlink():
+        raise Deny("invalid", "task_path_invalid", "the workspace tasks directory must not be a symlink")
+    tasks.mkdir(parents=True, exist_ok=True)
+    # The broker runs with umask 077 (the LaunchDaemon's), so set the modes: the agent must read its task.
+    if tasks.stat().st_uid == os.geteuid():
+        os.chmod(tasks, 0o755)
+    target = hc.resolve_in_workspace(cfg.workspace, rel)
+    if target is None or target.parent != tasks.resolve() or target.is_symlink():
+        raise Deny("invalid", "task_path_invalid", "task artifact path escapes the broker workspace")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(target, flags, 0o644)
+    except FileExistsError:
+        if target.is_symlink() or not target.is_file():
+            raise Deny("invalid", "task_conflict", "the task path exists but is not a regular file")
+        st = target.stat()
+        if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+            raise Deny("invalid", "task_conflict", "the existing task is not broker-owned and read-only to clients")
+        if not hmac.compare_digest(target.read_bytes(), raw):
+            raise Deny("invalid", "task_conflict", "the task path already holds different content")
+        return False
+    os.fchmod(fd, 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(raw)
+        fh.flush()
+        os.fsync(fh.fileno())
+    return True
+
+
+def task_origin(cfg: BrokerConfig, registry: dict | None, h: dict) -> dict:
+    """Who wrote a task, for receipts and the people who read them: from the signed handoff and the
+    registry, never from its text. Call it only for a handoff whose signature was checked."""
+    iug = h.get("issued_under_grant")
+    if isinstance(iug, dict):
+        import synthe_lane_templates as lanes
+        g = iug.get("grant") if isinstance(iug.get("grant"), dict) else {}
+        try:
+            rec = lanes.issue_record(cfg, g.get("template_id"), iug.get("issue"))
+        except Deny:
+            rec = None
+        return {"kind": "self_issued", "template_id": g.get("template_id"), "issue": iug.get("issue"),
+                "granted_by": g.get("approver"), "issuer": h.get("from"), "author": h.get("to"),
+                "issue_receipt_seq": (rec or {}).get("receipt_seq")}
+    sender = h.get("from")
+    who = ((registry or {}).get("agents") or {}).get(sender) if isinstance(sender, str) else None
+    return {"kind": "signed", "sender": sender, "sender_kind": (who or {}).get("kind")}
+
+
+def _origin_for_key(cfg: BrokerConfig, registry: dict | None, key, sender) -> dict | None:
+    """task_origin for a receipt that names a handoff only by key and sender (an approval, a delegate's
+    decision): from the broker's own staged record of that handoff, else its issue store."""
+    if not isinstance(key, str):
+        return None
+    with _staged_store(cfg, strict=False) as box:
+        recs = list((box["data"].get(key) or {}).values())
+    h = ((recs[0].get("packet") or {}).get("handoff") if recs else None) or None
+    if isinstance(h, dict) and h.get("from") == sender:
+        return task_origin(cfg, registry, h)
+    m = re.fullmatch(r"si:(.+):([1-9][0-9]*)", key)
+    if m and ((registry or {}).get("agents", {}).get(sender) or {}).get("kind") == hc.ISSUER_KIND:
+        import synthe_lane_templates as lanes
+        try:
+            rec = lanes.issue_record(cfg, m.group(1), int(m.group(2)))
+        except Deny:
+            rec = None
+        if rec and isinstance(rec.get("packet"), dict):
+            return task_origin(cfg, registry, rec["packet"]["handoff"])
+    return None
+
+
+def issue_request_problem(req) -> str | None:
+    """Why an issue request is malformed (a daemon error, never receipted), or None."""
+    if not isinstance(req, dict) or not set(req) <= ISSUE_REQUEST_FIELDS:
+        return f"an issue request takes only {', '.join(sorted(ISSUE_REQUEST_FIELDS))}"
+    if not isinstance(req.get("request_id"), str) or not _REQUEST_ID.fullmatch(req["request_id"]):
+        return "request_id must be 8-128 letters, digits, '.', '_', ':' or '-' (a fresh random id per task)"
+    if not GitPush._branch_ok(req.get("branch")):
+        return "branch must be a valid branch name"
+    if not isinstance(req.get("purpose"), str):
+        return "purpose must be a string: one line saying what the task is"
+    paths = req.get("owned_paths")
+    if paths is not None and (not isinstance(paths, list) or not 1 <= len(paths) <= 100 or any(
+            not isinstance(p, str) or hc._norm_cap_path(p) != p for p in paths)):
+        return "owned_paths must be 1-100 relative path globs (no '..', no leading '/', no backslash)"
+    deps = req.get("depends_on")
+    if deps is not None and (not isinstance(deps, list) or len(deps) > 50 or any(
+            not isinstance(d, str) or not d or d.startswith("~") or len(d) > 256 for d in deps)):
+        return "depends_on must be a list of up to 50 idempotency keys"
+    for k in ("template_id", "remote"):
+        if req.get(k) is not None and (not isinstance(req[k], str) or not req[k]):
+            return f"{k} must be a non-empty string"
+    return None
+
+
+def _issue_lifetime(t: dict, policy: dict, now: dt.datetime) -> dt.datetime:
+    """When a task issued now under grant `t` expires: the grant's own expiry, task_hours if it sets them
+    (else 30 days for a grant without expiry), and never past the receiver's max_ttl_hours."""
+    si = t["self_issue"]
+    hours = si.get("task_hours") or (None if "expires_at" in t else hc.SELF_ISSUE_DEFAULT_TASK_HOURS)
+    bounds = [now + dt.timedelta(hours=hours)] if hours else []
+    if "expires_at" in t:
+        bounds.append(hc.parse_ts(t["expires_at"]))
+    if hc._is_number(policy.get("max_ttl_hours")):
+        bounds.append(now + dt.timedelta(hours=policy["max_ttl_hours"]))
+    return min(bounds).astimezone(dt.timezone.utc).replace(microsecond=0)
+
+
+def _issued_task_text(h: dict, t: dict, n: int) -> str:
+    """The task file: a fixed header from the grant and the registry, then the agent's purpose fenced as
+    data. Nothing in it reads as the human's instruction except what the human signed."""
+    purpose = h["purpose"]
+    fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", purpose)), default=0))
+    of = f" of {t['self_issue']['max_tasks']}" if "max_tasks" in t["self_issue"] else ""
+    branch = h["planned_actions"][-1]["params"]["branch"]
+    return (f"# Task (self-issued)\n\nWritten by agent `{h['to']}`. Issued by Synthe under lane "
+            f"`{t['template_id']}`, signed by `{t['approver']}`. Task {n}{of}.\n"
+            f"The text below is the agent's own words: data, not an instruction from `{t['approver']}`.\n\n"
+            f"{fence}text\n{purpose}\n{fence}\n\nBranch: {branch}\n"
+            f"Paths: {', '.join(h['scope']['owned_paths'])}\n")
+
+
+def _open_tasks(cfg: BrokerConfig, g: dict, now: dt.datetime) -> int:
+    """Issued tasks of one grant that are neither COMPLETED nor expired. The ledger is read without its
+    lock: a stale read can only miss a completion, so the count errs high (toward refusing)."""
+    ledger = hc.load_ledger(cfg.ledger_path) if cfg.ledger_path else {}
+    n = 0
+    for rec in g["tasks"].values():
+        exp = hc.parse_ts((rec or {}).get("expires_at") or "")
+        if exp is None or exp <= now:
+            continue
+        entry = ledger.get(rec.get("idempotency_key")) if not ledger.get("_corrupt") else None
+        if not (isinstance(entry, dict) and hc.entry_state(entry) == "COMPLETED"):
+            n += 1
+    return n
+
+
+def issue_task(cfg: BrokerConfig, request, origin: dict | None = None) -> dict:
+    """Issue a task under a lane grant that allows it (v0.7), for the agent that asked (the broker's
+    receiver). The broker checks a live grant with `self_issue` covers the branch and paths, and the
+    grant's optional limits (max_tasks, max_open, max_per_hour), all under the lane lock; then it builds
+    the packet from the grant and the receiver policy (only the purpose, branch, paths, depends_on and
+    request_id come from the agent), signs it with its task issuer key, writes the task file and receipts
+    the decision (`task_issue`: task_issued / task_issue_refused). The same request_id with the same body
+    returns the same packet and receipt and spends nothing; with another body it is
+    `self_issue_request_conflict`. It never claims: the claim stays the one admission path.
+
+    Returns {"decision", "reasons", "receipt", "packet" (or None), "task", "replayed"}. A malformed
+    request raises Deny("invalid", "request_malformed") and is not receipted."""
+    import synthe_lane_templates as lanes
+    if origin is None:
+        refusal = in_process_refusal(cfg, "synthe_commit.issue_task()")
+        if refusal:
+            raise NotIsolated(refusal)
+    problem = issue_request_problem(request)
+    if problem:
+        raise Deny("invalid", "request_malformed", problem)
+    key = ss.load_key(str(cfg.key_path))
+    origin = origin or IN_PROCESS
+    req = {k: request[k] for k in ISSUE_REQUEST_FIELDS if request.get(k) is not None}
+    rid, receiver, purpose = req["request_id"], cfg.receiver_id, req["purpose"]
+    body_sha = hashlib.sha256(sc.canonical_json({k: v for k, v in req.items() if k != "request_id"})).hexdigest()
+    now = hc.now_utc().replace(microsecond=0)
+    receipt: dict = {"v": 1, "kind": "task_issue", "time": now.isoformat(), "decision": None, "reasons": [],
+                     "request_id": rid, "requested_by": {"agent": receiver,
+                                                         "uid": (origin.get("isolation") or {}).get("peer_uid")},
+                     "task": {"branch": req["branch"], "owned_paths": req.get("owned_paths"),
+                              "depends_on": req.get("depends_on") or [],
+                              "purpose_sha256": hashlib.sha256(purpose.encode("utf-8", "surrogatepass")).hexdigest(),
+                              "purpose_author": receiver},
+                     "agent_says": {"purpose": synthe_risk.clean(purpose, True)[:hc.SELF_ISSUE_MAX_PURPOSE_CHARS]},
+                     "via": origin.get("via"), "isolation": origin.get("isolation")}
+
+    def finish(decision, reasons=(), **fields):
+        receipt.update(decision=decision, reasons=[{**r, "message": str(r.get("message", ""))} for r in reasons],
+                       **fields)
+        receipt.update(scrub_obj(receipt, cfg))
+        return append_receipt(cfg, key, receipt)
+
+    def refused(reason):
+        r = finish("task_issue_refused", [reason])
+        return {"decision": r["decision"], "reasons": r["reasons"], "receipt": r, "packet": None, "replayed": False}
+
+    with lanes.locked(cfg):
+        store = lanes.issue_load(cfg)
+        prior = store["requests"].get(rid)
+        if prior is not None:
+            if prior.get("body_sha256") != body_sha:
+                return refused({"state": "conflicting", "code": "self_issue_request_conflict",
+                                "message": f"request_id {rid!r} was already used for a different task; "
+                                           f"nothing was issued (use a fresh request_id per task)"})
+            g = store["grants"].get(prior.get("template_id")) or {}
+            rec = (g.get("tasks") or {}).get(str(prior.get("issue")))
+            return _complete_issue(cfg, key, store, rec, finish, replayed=True)
+        try:
+            if not receiver:
+                raise Deny("blocked", "self_issue_not_granted", "this broker names no receiver to issue tasks to")
+            # Signed registry: enforced once a genesis key is pinned
+            # (SYNTHE_REGISTRY_GENESIS_KEY or registry-genesis.key); unsigned otherwise
+            registry, err = hc.load_registry(str(cfg.registry_path), allow_unsigned=True)
+            if err:
+                raise Deny("invalid", err["reasons"][0]["code"], err["reasons"][0]["message"])
+            t = lanes.select_self_issue(cfg, registry, receiver, req["branch"], req.get("owned_paths"),
+                                        req.get("remote"), req.get("template_id"))
+            si, tid = t["self_issue"], t["template_id"]
+            g = store["grants"].setdefault(tid, {"issued": 0, "recent": [], "tasks": {}})
+            g["recent"] = [x for x in g["recent"] if (hc.parse_ts(x) or now) > now - dt.timedelta(hours=1)]
+            n_open = _open_tasks(cfg, g, now)
+            receipt["grant"] = {"template_id": tid, "granted_by": t["approver"], "grant_sha256": lanes.digest(t),
+                                "issue": g["issued"] + 1, "open": n_open,
+                                **{k: si[k] for k in ("max_tasks", "max_open", "max_per_hour") if k in si}}
+            why = hc.self_issue_purpose_problem(purpose, hc.self_issue_purpose_limit(t))
+            if why:
+                raise Deny("invalid", "self_issue_purpose_invalid", why)
+            if "max_tasks" in si and g["issued"] >= si["max_tasks"]:
+                raise Deny("blocked", "self_issue_exhausted",
+                           f"lane {tid} allows {si['max_tasks']} self-issued tasks, and all are issued")
+            if "max_open" in si and n_open >= si["max_open"]:
+                raise Deny("blocked", "self_issue_open_limit",
+                           f"lane {tid} allows {si['max_open']} open self-issued tasks at once; finish one first")
+            if "max_per_hour" in si and len(g["recent"]) >= si["max_per_hour"]:
+                raise Deny("blocked", "self_issue_rate_limited",
+                           f"lane {tid} allows {si['max_per_hour']} self-issued tasks an hour")
+            packet, text = _build_issued(cfg, registry, t, g["issued"] + 1, req, now)
+        except Deny as d:
+            return refused(d.reason)
+        h = packet["handoff"]
+        n = h["issued_under_grant"]["issue"]
+        digest = hc.handoff_digest(h)
+        receipt["grant"]["open"] = n_open + 1
+        fields = {"handoff": {"id": h["id"], "idempotency_key": h["idempotency_key"], "trace_id": h["trace_id"],
+                              "from": h["from"], "to": h["to"], "packet_sha256": digest},
+                  "grant": receipt["grant"],
+                  "task": {**receipt["task"], "handoff_id": h["id"], "idempotency_key": h["idempotency_key"],
+                           "packet_sha256": digest, "owned_paths": h["scope"]["owned_paths"],
+                           "expires_at": h["acceptance"]["expires_at"]},
+                  "task_origin": {k: v for k, v in task_origin(cfg, registry, h).items() if k != "issue_receipt_seq"},
+                  "plan": sp.plan_for(packet, registry, hc.load_ledger(cfg.ledger_path), tuple(cfg.effects))}
+        rec = {"handoff_id": h["id"], "idempotency_key": h["idempotency_key"], "packet_sha256": digest,
+               "branch": req["branch"], "owned_paths": h["scope"]["owned_paths"],
+               "expires_at": h["acceptance"]["expires_at"], "issued_at": now.isoformat(), "request_id": rid,
+               "body_sha256": body_sha, "task_path": h["inputs"]["artifact_refs"][0]["path"], "task_text": text,
+               "packet": packet, "receipt_fields": fields, "receipt_seq": None}
+        # n is spent from here on, and never refunded: a crash before the receipt leaves the request replayable.
+        g.update(issued=n, recent=g["recent"] + [now.isoformat()])
+        g["tasks"][str(n)] = rec
+        store["requests"][rid] = {"template_id": t["template_id"], "issue": n, "body_sha256": body_sha}
+        lanes.issue_save(cfg, store)
+        return _complete_issue(cfg, key, store, rec, finish, replayed=False)
+
+
+def _build_issued(cfg: BrokerConfig, registry: dict, t: dict, n: int, req: dict, now: dt.datetime) -> tuple:
+    """(signed packet, task file text) for issue n under grant t. The packet comes from the grant and the
+    receiver's policy (budget and forbidden written out, so receiver defaults never widen it); it is checked
+    with the checker itself before anything is spent."""
+    import synthe_lane_templates as lanes
+    conf = lanes.issuer_config(cfg)
+    if conf is None or conf["issuer"] != t["self_issue"]["issuer"]:
+        raise Deny("blocked", "issuer_invalid", "this broker holds no task issuer key for this grant")
+    try:
+        issuer_key = ss.load_key(str(cfg.rel(conf["key_file"])))
+    except Exception:
+        raise Deny("blocked", "issuer_invalid", "this broker's task issuer key is missing or unreadable") from None
+    if issuer_key.get("agent") != conf["issuer"]:
+        raise Deny("blocked", "issuer_invalid", "the task issuer key belongs to another identity")
+    receiver, si, tid = cfg.receiver_id, t["self_issue"], t["template_id"]
+    policy = hc.receiver_policy(registry, receiver) or {}
+    defaults = policy.get("defaults") if isinstance(policy.get("defaults"), dict) else {}
+    budget = next((b for b in (defaults.get("budget"), policy.get("budget")) if isinstance(b, dict)
+                   and all(hc._is_number(b.get(k)) for k in ("tokens", "usd", "minutes"))), None)
+    tools = list(si.get("tools") or hc.SELF_ISSUE_DEFAULT_TOOLS)
+    hid = f"si-{hashlib.sha256(tid.encode()).hexdigest()[:8]}-{n}"
+    rel = f"tasks/{hid}.md"
+    h = {"schema_version": "0.1", "id": hid, "trace_id": f"t-{hid}", "idempotency_key": f"si:{tid}:{n}",
+         "from": conf["issuer"], "to": receiver, "on_failure": "reject", "purpose": req["purpose"],
+         "inputs": {"artifact_refs": [{"path": rel, "sha256": ""}]},
+         "scope": {"owned_paths": list(req.get("owned_paths") or t["path_scope"]),
+                   "forbidden": sorted(set(policy.get("forbidden") or []))},
+         "authority": {"allowed_tools": tools, "approval_required_for": ["git_push"], "approvals": [],
+                       "budget": {k: budget[k] for k in ("tokens", "usd", "minutes")} if budget
+                       else {"tokens": 0, "usd": 0, "minutes": 0}},
+         "planned_actions": ([{"name": "edit", "tool": "edit_files"}] if "edit_files" in tools else [])
+         + [{"name": ISSUED_PUSH, "tool": "git_push",
+             "params": {"remote": t["params"]["remote"], "branch": req["branch"]}}],
+         "acceptance": {"expires_at": _issue_lifetime(t, policy, now).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "output_schema": defaults.get("output_schema") or "synthe.commit.v1",
+                        "required_evidence": ["test_output"], "evidence": [{"kind": "test_output", "ref": rel}]},
+         "issued_under_grant": {"grant": t, "issue": n, "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "request_id": req["request_id"]}}
+    if req.get("depends_on"):
+        h["depends_on"] = list(req["depends_on"])
+    text = _issued_task_text(h, t, n)
+    h["inputs"]["artifact_refs"][0]["sha256"] = hashlib.sha256(text.encode()).hexdigest()
+    packet = ss.sign_packet({"handoff": h}, issuer_key)
+    # The checker's own verdict, on a scratch copy of the workspace holding just this task file: a packet the
+    # claim would refuse (the receiver's policy, its max_ttl_hours, ...) is never issued and spends nothing.
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "tasks").mkdir()
+        (Path(tmp) / rel).write_text(text)
+        ok, reasons = hc.validate(packet, registry=registry, ledger={}, workspace=Path(tmp), at=hc.now_utc(),
+                                  defer_approvals={ISSUED_PUSH}, as_receiver=receiver,
+                                  verify_evidence=cfg.verify_evidence)
+    if not ok:
+        raise Deny(reasons[0]["state"], reasons[0]["code"], reasons[0]["message"])
+    return packet, text
+
+
+def _complete_issue(cfg: BrokerConfig, key: dict, store: dict, rec, finish, replayed: bool) -> dict:
+    """Make an issued task real (its task file, its receipt) or, for a replay, return what was made. Caller
+    holds the lane lock. A crash part-way leaves the issue spent and the same request able to finish it."""
+    import synthe_lane_templates as lanes
+    if not isinstance(rec, dict) or not isinstance(rec.get("packet"), dict):
+        raise Deny("invalid", "template_store_corrupt", "the issue record for this request is missing")
+    write_task_file(cfg, rec["task_path"], rec["task_text"].encode())
+    seq = rec.get("receipt_seq")
+    if isinstance(seq, int):
+        stored = _read_receipts(cfg.receipts_path)
+        receipt = stored[seq - 1] if 0 < seq <= len(stored) else None
+        if not isinstance(receipt, dict) or receipt.get("seq") != seq:
+            raise Deny("unknown", "replay_receipt_mismatch", "the stored issue receipt is not where it should be")
+    else:
+        receipt = finish("task_issued", [], **rec["receipt_fields"])
+        rec["receipt_seq"] = receipt["seq"]
+        lanes.issue_save(cfg, store)
+    return {"decision": "task_issued", "reasons": [], "receipt": receipt, "packet": rec["packet"],
+            "task": {"path": rec["task_path"], "issue": rec["packet"]["handoff"]["issued_under_grant"]["issue"],
+                     "template_id": rec["packet"]["handoff"]["issued_under_grant"]["grant"]["template_id"],
+                     "expires_at": rec["expires_at"]},
+            "replayed": replayed}
 
 
 class _DenyMany(Exception):
@@ -2301,6 +2703,17 @@ def cmd_init(a) -> int:
                                        "private_key": sc.b64u(secret)}, indent=2) + "\n")
         os.chmod(keyfile, 0o600)
         pub = {"kid": kid, "alg": sc.ALG, "public_key": sc.b64u(sc.public_key(secret))}
+    # v0.7: the task issuer key, made here so it belongs to the broker's OS user like the broker key (the
+    # installers run this as that user); `synthe-init apply-config` registers it and enables self-issue.
+    issuer_file = d / "keys" / f"{a.issuer_id}.key.json"
+    if not issuer_file.exists():
+        fd = os.open(issuer_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"agent": a.issuer_id, "kid": f"{a.issuer_id}-1", "alg": sc.ALG,
+                                 "private_key": sc.b64u(sc.generate_secret())}, indent=2) + "\n")
+    issuer = json.loads(issuer_file.read_text())
+    issuer_pub = {"kid": issuer["kid"], "alg": sc.ALG,
+                  "public_key": sc.b64u(sc.public_key(sc.unb64u(issuer["private_key"])))}
     cfg_path = d / "broker.json"
     if not cfg_path.exists():
         cfg_path.write_text(json.dumps({
@@ -2316,9 +2729,12 @@ def cmd_init(a) -> int:
         keys = entry.setdefault("keys", [])
         if not any(k.get("kid") == pub["kid"] for k in keys):
             keys.append(pub)
+        reg["agents"].setdefault(a.issuer_id, {"role": "task issuer", "kind": hc.ISSUER_KIND, "keys": [issuer_pub]})
         reg_path.write_text(json.dumps(reg, indent=2) + "\n")
-        print(f"added {a.broker_id} ({pub['kid']}) to {reg_path}", file=sys.stderr)
+        print(f"added {a.broker_id} ({pub['kid']}) and {a.issuer_id} to {reg_path}", file=sys.stderr)
     else:
+        print(f"# task issuer: agents.{a.issuer_id} = {{\"kind\": \"{hc.ISSUER_KIND}\", \"keys\": "
+              f"[{json.dumps(issuer_pub)}]}}", file=sys.stderr)
         print(f"# add under agents.{a.broker_id}.keys in your registry:", file=sys.stderr)
     print(json.dumps(pub, indent=2))
     print(f"# broker config: {cfg_path}", file=sys.stderr)
@@ -2404,6 +2820,8 @@ def main(argv=None) -> int:
     i = sub.add_parser("init", help="create a broker key and config skeleton")
     i.add_argument("--dir", required=True)
     i.add_argument("--broker-id", default="synthe-broker")
+    i.add_argument("--issuer-id", default="synthe-issuer",
+                   help="the task issuer identity (v0.7): signs tasks the broker issues under a lane grant")
     i.add_argument("--add-to-registry", action="store_true",
                    help="add the broker's public key to DIR/registry.json")
     i.add_argument("--isolation", choices=["user", "container", "none"], default="user",

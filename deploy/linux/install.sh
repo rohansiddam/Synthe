@@ -6,7 +6,8 @@
 #
 # Creates the system user `synthe`, copies the code to /opt/synthe/src (root-
 # owned, so neither the broker nor an agent can change it), makes a venv with
-# `cryptography` (constant-time Ed25519), creates the broker key and config in
+# `cryptography` (constant-time Ed25519), creates the broker key, the task issuer
+# key (v0.7: it signs tasks the broker issues under a lane grant) and config in
 # /var/lib/synthe (0700, owned by synthe) with isolation mode "user" and
 # clients = [AGENT_USER], and installs the systemd unit. It does NOT start the
 # broker: add the registry and the GitHub token first (printed at the end).

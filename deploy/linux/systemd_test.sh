@@ -67,6 +67,7 @@ check "/var/lib/synthe is 0700 synthe" test "$(stat -c '%a %U' /var/lib/synthe)"
 check "the broker key is 0600 synthe" test "$(stat -c '%a %U' /var/lib/synthe/keys/synthe-broker.key.json)" = "600 synthe"
 out=$(as agent1 cat /var/lib/synthe/keys/synthe-broker.key.json 2>&1 || true)
 check "agent1 cannot read the key: ${out##*: }" grep -q "Permission denied" <<<"$out"
+check "the task issuer key is 0600 synthe" test "$(stat -c '%a %U' /var/lib/synthe/keys/synthe-issuer.key.json)" = "600 synthe"
 
 C=(python3 /opt/synthe/src/synthe_client.py --broker unix:///run/synthe/broker.sock)
 as agent1 git config --global --add safe.directory /srv/git/remote.git

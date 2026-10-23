@@ -7,7 +7,8 @@
 #
 # Creates the hidden user and group `_synthe` (uid/gid below 500), copies the
 # code to /Library/Synthe/src (root-owned), makes /Library/Synthe/venv with
-# `cryptography`, creates the broker key and config in /var/db/synthe (0700,
+# `cryptography`, creates the broker key, the task issuer key (v0.7: it signs
+# tasks the broker issues under a lane grant) and config in /var/db/synthe (0700,
 # owned by _synthe) with isolation mode "user" and clients = [AGENT_USER], and
 # installs /Library/LaunchDaemons/com.synthe.broker.plist. The plist is world-
 # readable, so it never holds a token: the GitHub token goes in a 0600 file

@@ -17,9 +17,20 @@ synthe-client. The broker still decides, and receipts, every proposal.
 
 Which task: $SYNTHE_TASK or `git config synthe.task` (a packet path) if set; otherwise the newest
 unexpired packet in the inbox ($SYNTHE_INBOX, `git config synthe.inbox`, or the macOS installer's
-/Users/Shared/Synthe/inbox) that plans a git_push of this branch.
+/Users/Shared/Synthe/inbox) that plans a git_push of this branch. A human-signed task always wins.
 
-Stdlib only. Protocol: gitremote-helpers(7) (capabilities, list, fetch, push).
+With none (v0.7): the open self-issued task this clone holds for the branch, else a new one. If a lane
+grant the human signed lets the agent start its own work (`self_issue`), the broker issues a task under it,
+signed by its task issuer key, and the push is claimed and proposed as usual: routine pushes inside the
+lane then go out with nobody asked. The task's purpose is the tip commit's subject (cleaned, one line,
+labelled as written by the agent), or `git push -o synthe.purpose="..."`. The request id is written under
+.git/synthe/issue/ before the broker is asked, so a retry never issues twice; the issued task is kept
+under .git/synthe/tasks/ until it lands, and a task whose grant was revoked or that already landed is
+replaced by a fresh one. Issued tasks never go in the inbox: it stays human-written.
+
+  git push origin agent/my-branch -o synthe.purpose="Add a --version flag"
+
+Stdlib only. Protocol: gitremote-helpers(7) (capabilities, option, list, fetch, push).
 """
 from __future__ import annotations
 
@@ -28,9 +39,11 @@ import datetime as dt
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,6 +52,13 @@ import synthe_client as scl  # noqa: E402
 DEFAULT_BROKER = "unix:///run/synthe/broker.sock" if sys.platform == "linux" else "unix:///var/db/synthe-run/broker.sock"
 DEFAULT_INBOX = "/var/lib/synthe-shared/inbox" if sys.platform == "linux" else "/Users/Shared/Synthe/inbox"
 HEADS = "refs/heads/"
+PURPOSE_OPTION = "synthe.purpose="
+PURPOSE_CHARS = 280   # the default limit a lane grant puts on a self-issued task's purpose
+# A self-issued task the broker won't take any more (its grant revoked, expired or changed; it landed
+# already; it expired): drop it and issue a fresh one, once per push.
+DEAD_TASK_CODES = {"template_revoked", "template_expired", "template_stale", "template_unavailable",
+                   "self_issue_unknown", "handoff_expired", "duplicate_idempotency_key", "effect_already_executed",
+                   "effect_fingerprint_mismatch", "unknown_outcome"}
 
 
 def _git(*args, check=True) -> subprocess.CompletedProcess:
@@ -149,6 +169,102 @@ def claim_token(client: scl.BrokerClient, packet: dict) -> str:
 
 
 # --------------------------------------------------------------------------
+# self-issued tasks (v0.7): no human-signed task for the branch, so ask the broker to issue one
+
+def clean_purpose(text, limit: int = PURPOSE_CHARS) -> str:
+    """A commit subject made into a purpose the broker accepts: NFC, one line, no control or format
+    characters (each becomes a space), whitespace collapsed, at most `limit` characters."""
+    text = unicodedata.normalize("NFC", str(text or ""))
+    text = "".join(" " if unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") else c
+                   for c in text)
+    text = " ".join(text.split())[:limit].rstrip()
+    return unicodedata.normalize("NFC", text)[:limit]
+
+
+def _unquote(value: str) -> str:
+    """git C-quotes an option value that holds quotes, backslashes, control or non-ASCII bytes."""
+    if len(value) < 2 or not (value.startswith('"') and value.endswith('"')):
+        return value
+    out, i, body = bytearray(), 0, value[1:-1]
+    simple = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+    while i < len(body):
+        c = body[i]
+        if c == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in simple:
+                out.append(simple[nxt])
+                i += 2
+                continue
+            if body[i + 1:i + 4].isdigit() and len(body[i + 1:i + 4]) == 3:
+                out.append(int(body[i + 1:i + 4], 8) & 0xFF)
+                i += 4
+                continue
+        out += c.encode()
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _branch_file(kind: str, branch: str) -> Path:
+    return _git_dir() / "synthe" / kind / f"{hashlib.sha256(branch.encode()).hexdigest()[:32]}.json"
+
+
+def _write_private(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(obj, fh)
+
+
+def open_self_issued(branch: str, now: dt.datetime | None = None) -> dict | None:
+    """The self-issued task this clone holds for the branch, while it is unexpired."""
+    try:
+        packet = json.loads(_branch_file("tasks", branch).read_text()).get("packet")
+    except (OSError, ValueError, AttributeError):
+        return None
+    ok = isinstance(packet, dict) and "issued_under_grant" in (packet.get("handoff") or {})
+    if not ok or _push_action(packet, branch) is None or _expired(packet, now or dt.datetime.now(dt.timezone.utc)):
+        return None
+    return packet
+
+
+def forget_self_issued(branch: str) -> None:
+    for kind in ("tasks", "issue"):
+        _branch_file(kind, branch).unlink(missing_ok=True)
+
+
+def issue_task(client: scl.BrokerClient, branch: str, purpose: str) -> tuple[dict, dict]:
+    """Ask the broker for a task for this branch: (packet, the broker's answer). The request id is saved
+    before asking, so a retry after a crash or a lost answer replays it instead of issuing twice."""
+    req_path = _branch_file("issue", branch)
+    try:
+        req = json.loads(req_path.read_text())
+        if req.get("branch") != branch or not isinstance(req.get("request_id"), str):
+            raise ValueError()
+    except (OSError, ValueError, AttributeError):
+        req = {"request_id": "r-" + secrets.token_hex(12), "branch": branch, "purpose": purpose}
+        _write_private(req_path, req)
+    out = client.call("issue_task", request_id=req["request_id"], branch=branch, purpose=req["purpose"])
+    if not isinstance(out, dict) or out.get("decision") != "task_issued":
+        req_path.unlink(missing_ok=True)   # nothing was issued: the next push asks afresh
+        reasons = [r for r in (out or {}).get("reasons") or [] if isinstance(r, dict)]
+        code = reasons[0].get("code", "task_issue_refused") if reasons else "task_issue_refused"
+        raise scl.BrokerError(code, f"no signed task for {branch}, and Synthe would not issue one: "
+                                    f"{reasons[0].get('message') if reasons else 'no reason given'}. Ask the "
+                                    f"approver for a task (synthe-task new \"...\" --branch {branch}) or a lane "
+                                    f"grant that lets you start your own work")
+    _write_private(_branch_file("tasks", branch), {"branch": branch, "packet": out["packet"]})
+    req_path.unlink(missing_ok=True)
+    return out["packet"], out
+
+
+def _issued_label(packet: dict) -> str:
+    iug = (packet.get("handoff") or {}).get("issued_under_grant") or {}
+    g = iug.get("grant") or {}
+    of = f" of {g['self_issue']['max_tasks']}" if "max_tasks" in (g.get("self_issue") or {}) else ""
+    return f"task {iug.get('issue')}{of} under lane {g.get('template_id')} (signed by {g.get('approver')})"
+
+
+# --------------------------------------------------------------------------
 # the remote helper
 
 class Helper:
@@ -160,6 +276,7 @@ class Helper:
         self.client = scl.BrokerClient(address, expected_broker_uid=uid)
         self.remote_name, self.out = remote_name, out or sys.stdout
         self.fetched: dict | None = None
+        self.push_options: list[str] = []
 
     def send(self, *lines: str) -> None:
         for line in lines:
@@ -194,6 +311,19 @@ class Helper:
         self.send("")
 
     # push ---------------------------------------------------------------
+    def self_issued(self, branch: str, sha: str) -> dict:
+        """The open self-issued task for the branch, or a new one the broker issues (v0.7)."""
+        packet = open_self_issued(branch)
+        if packet is not None:
+            return packet
+        given = [o[len(PURPOSE_OPTION):] for o in self.push_options if o.startswith(PURPOSE_OPTION)]
+        subject = _git("log", "-1", "--format=%s", sha, check=False).stdout
+        purpose = given[-1] if given else (clean_purpose(subject) or f"Work on {branch}")
+        packet, out = issue_task(self.client, branch, purpose)
+        _say(f"no signed task for {branch}; Synthe issued {_issued_label(packet)}"
+             f"{' (the same request again)' if out.get('replayed') else ''}. Its purpose is your own words.")
+        return packet
+
     def push_one(self, spec: str) -> str:
         src, _, dst = spec.lstrip("+").partition(":")
         if not dst.startswith(HEADS):
@@ -206,18 +336,45 @@ class Helper:
             sha = _git("rev-parse", "--verify", f"{src}^{{commit}}").stdout.strip()
             explicit = os.environ.get("SYNTHE_TASK") or _config("synthe.task") or None
             inbox = os.environ.get("SYNTHE_INBOX") or _config("synthe.inbox") or None
-            packet, action, path = find_task(branch, Path(inbox) if inbox else None, explicit)
-            token = claim_token(self.client, packet)
-            params = action.get("params") or {}
-            receipt = scl.push(self.client, packet, token, action["name"], params.get("remote", "origin"),
-                               branch, repo=".", commit=sha, base=params.get("base"), wait_for_approval=True)
+            try:
+                packet, action, path = find_task(branch, Path(inbox) if inbox else None, explicit)
+                name, issued = path.name, False
+            except scl.BrokerError as exc:
+                if exc.code != "no_task_for_branch":
+                    raise
+                packet, issued = self.self_issued(branch, sha), True   # v0.7: none signed; ask the broker
+            for attempt in (1, 2):
+                try:
+                    action = _push_action(packet, branch)
+                    token = claim_token(self.client, packet)
+                    params = action.get("params") or {}
+                    receipt = scl.push(self.client, packet, token, action["name"], params.get("remote", "origin"),
+                                       branch, repo=".", commit=sha, base=params.get("base"), wait_for_approval=True)
+                    dead = receipt.get("decision") == "denied" and DEAD_TASK_CODES & {
+                        r.get("code") for r in receipt.get("reasons") or [] if isinstance(r, dict)}
+                except scl.BrokerError as exc:
+                    if not (issued and attempt == 1 and exc.code in DEAD_TASK_CODES):
+                        raise
+                    dead = True
+                if not (issued and attempt == 1 and dead):
+                    break
+                # The self-issued task is spent (it landed, its grant was revoked or changed, it expired):
+                # a fresh one, once.
+                _say(f"{branch}: the self-issued task for this branch can't be used any more; asking for a new one.")
+                forget_self_issued(branch)
+                packet = self.self_issued(branch, sha)
+            if issued:
+                iug = packet["handoff"]["issued_under_grant"]
+                name = f"self-issued task {iug['issue']} under lane {iug['grant'].get('template_id')}"
         except scl.BrokerError as exc:
             _say(f"{branch}: not proposed ({exc.code}). {exc.message}")
             return f"error {dst} {exc.code}"
         decision, seq = receipt.get("decision"), receipt.get("seq")
         short = sha[:12]
+        if issued and decision == "executed":
+            forget_self_issued(branch)   # it landed: the next push on this branch is new work
         if decision == "staged":
-            _say(f"{branch} at {short} is proposed for approval, not pushed yet (task {path.name}, receipt #{seq}).")
+            _say(f"{branch} at {short} is proposed for approval, not pushed yet ({name}, receipt #{seq}).")
             _say("A person reviews the diff and approves it with synthe-approve; then Synthe pushes exactly this")
             _say("commit and signs a receipt. Don't push it another way, and don't approve it yourself.")
             return f"ok {dst}"
@@ -239,7 +396,16 @@ class Helper:
         for raw in stdin:
             line = raw.rstrip("\n")
             if line == "capabilities":
-                self.send("fetch", "push", "")
+                self.send("fetch", "push", "option", "")
+            elif line.startswith("option "):
+                # Only push options (`git push -o synthe.purpose=...`) mean anything here; git carries on
+                # without the rest (verbosity, progress, ...).
+                name, _, value = line[len("option "):].partition(" ")
+                if name == "push-option":
+                    self.push_options.append(_unquote(value))
+                    self.send("ok")
+                else:
+                    self.send("unsupported")
             elif line in ("list", "list for-push"):
                 self.list_refs(line == "list for-push")
             elif line.startswith("fetch "):

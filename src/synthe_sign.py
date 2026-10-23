@@ -243,7 +243,7 @@ def sign_packet(packet: dict, key: dict) -> dict:
     h = packet["handoff"]
     if h.get("from") != key["agent"]:
         raise SystemExit(f"key belongs to '{key['agent']}' but packet is from '{h.get('from')}'")
-    sig = sc.sign_bytes(key["_secret"], sc.packet_signing_input(h))
+    sig = sc.sign_bytes(key["_secret"], sc.handoff_signing_input(h))  # v0.7: self-issued ones in their own domain
     packet["signature"] = {"signer": key["agent"], "kid": key["kid"], "alg": sc.ALG,
                            "sig": sc.b64u(sig)}
     return packet
@@ -507,7 +507,7 @@ def cmd_verify(a) -> int:
                    and sc.kid_is_revoked(registry, sig.get("signer"), sig.get("kid")))
         key = None if revoked else sc.find_key(registry, sig.get("signer"), sig.get("kid"))
         good = (key is not None and sig.get("signer") == h.get("from")
-                and sc.verify_bytes(key, sc.packet_signing_input(h), sc.unb64u(sig.get("sig", ""))))
+                and sc.verify_bytes(key, sc.handoff_signing_input(h), sc.unb64u(sig.get("sig", ""))))
         report["packet_signature"] = "REVOKED" if revoked else ("verified" if good else "INVALID")
         ok &= good and not revoked
     for appr in (h.get("authority", {}) or {}).get("approvals", []) or []:
