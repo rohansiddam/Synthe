@@ -42,14 +42,14 @@ MUTATIONS = {
         '    if False and (not token.startswith(GITHUB_TOKEN_PREFIXES)',
     ),
     "task folder left to the umask": (
-        "src/synthe_broker.py",
-        "            os.chmod(tasks, 0o755)\n",
-        "            pass\n",
+        "src/synthe_commit.py",   # v0.7: write_task_file, shared by submit_task and self-issued tasks
+        "        os.chmod(tasks, 0o755)\n",
+        "        pass\n",
     ),
     "task file left to the umask": (
-        "src/synthe_broker.py",
-        "                os.fchmod(fd, 0o644)\n",
-        "                pass\n",
+        "src/synthe_commit.py",
+        "    os.fchmod(fd, 0o644)\n",
+        "    pass\n",
     ),
     "the agent may run in the approver's account": (
         "src/synthe_init.py",
@@ -102,19 +102,19 @@ MUTATIONS = {
         "            verdict = {\"decision\": \"ACCEPT\"} if True else hc.check(packet, registry=registry, ledger_path=None, workspace=self.cfg.workspace,\n",
     ),
     "task path can overwrite": (
-        "src/synthe_broker.py",
-        "            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, \"O_NOFOLLOW\", 0)\n",
-        "            flags = os.O_WRONLY | os.O_CREAT | getattr(os, \"O_NOFOLLOW\", 0)\n",
+        "src/synthe_commit.py",
+        "    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, \"O_NOFOLLOW\", 0)\n",
+        "    flags = os.O_WRONLY | os.O_CREAT | getattr(os, \"O_NOFOLLOW\", 0)\n",
     ),
     "writable task reused": (
-        "src/synthe_broker.py",
-        "                if st.st_uid != self.uid or st.st_mode & 0o022:\n",
-        "                if False:\n",
+        "src/synthe_commit.py",
+        "        if st.st_uid != os.geteuid() or st.st_mode & 0o022:\n",
+        "        if False:\n",
     ),
     "task symlink accepted": (
-        "src/synthe_broker.py",
-        "        if tasks.is_symlink():\n",
-        "        if False:\n",
+        "src/synthe_commit.py",
+        "    if tasks.is_symlink():\n",
+        "    if False:\n",
     ),
     "task CLI bypasses broker": (
         "src/synthe_task.py",

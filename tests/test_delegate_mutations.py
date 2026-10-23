@@ -33,7 +33,7 @@ MUTATIONS = {
  "grant expiry ignored": ("src/synthe_lane_templates.py", '        if expiry is None or expiry <= hc.now_utc():\n            fail("template_expired")\n', ''),
  "grant lineage ignored": ("src/synthe_lane_templates.py", '    if x["lineage"] != lineage(cfg, registry, x["receiver"], risk_aware="auto_approve" in x):\n        fail("template_stale")\n', ''),
  "grant max uses ignored": ("src/synthe_lane_templates.py", '            if exhausted(s, t):\n                fail("template_exhausted")\n            if params', '            if params'),
- "grant revocation ignored": ("src/synthe_lane_templates.py", '            if tid in s["revoked"]:\n                fail("template_revoked")\n            if exhausted(s, t)', '            if exhausted(s, t)'),
+ "grant revocation ignored": ("src/synthe_lane_templates.py", '            if tid in s["revoked"]:\n                fail("template_revoked")\n            if exhausted(s, t):\n                fail("template_exhausted")\n            if params.get(', '            if exhausted(s, t):\n                fail("template_exhausted")\n            if params.get('),
  "grant path scope ignored": ("src/synthe_lane_templates.py", '            if paths is not None and any(not any_match(t["path_scope"], p) for p in paths):\n', '            if False:\n'),
 }
 

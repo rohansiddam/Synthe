@@ -268,7 +268,7 @@ class Broker:
             # packet is refused for what it is, and only a genuine one is looked up in the broker's own state.
             pre = hc.check(packet, registry=registry, ledger_path=self.cfg.ledger_path, workspace=self.cfg.workspace,
                            dry_run=True, verify_evidence=self.cfg.verify_evidence, extra_approvals=extra,
-                           defer_approvals=defer, as_receiver=self.cfg.receiver_id)
+                           as_receiver=self.cfg.receiver_id, defer_approvals=defer)
             if not isinstance(pre, dict) or pre.get("decision") != "ACCEPT":
                 return pre
             import synthe_lane_templates as lanes

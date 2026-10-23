@@ -98,7 +98,8 @@ def test_apply_config_merges_into_the_installers_broker_and_it_passes_the_broker
     reg = json.loads((state / "registry.json").read_text())
     key = json.loads((state / "keys" / "synthe-broker.key.json").read_text())
     assert reg["agents"]["synthe-broker"]["keys"][0]["kid"] == key["kid"] == out["broker_kid"]
-    assert set(reg["agents"]) == {"rohan", "openclaw", "synthe-broker"}
+    assert set(reg["agents"]) == {"rohan", "openclaw", "synthe-broker", "synthe-issuer"}   # v0.7: init made its key
+    assert reg["agents"]["synthe-issuer"]["kind"] == "task_issuer"
     for f in ("registry.json", "broker.json"):
         assert (state / f).stat().st_mode & 0o777 == 0o600
     state.chmod(0o700)  # the installer makes /var/db/synthe 0700

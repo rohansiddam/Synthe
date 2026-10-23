@@ -44,7 +44,7 @@ def test_declared_command_initializes_with_broker_environment_unset(world):
     assert result.returncode == 0 and not result.stderr, result.stderr
     responses = {r["id"]: r for r in map(json.loads, result.stdout.splitlines()) if "id" in r}
     assert "serverInfo" in responses[1]["result"]
-    assert len(responses[2]["result"]["tools"]) == 7
+    assert len(responses[2]["result"]["tools"]) == 8     # v0.7: synthe_start_task
 
 
 def test_dead_broker_exits_with_one_clear_stderr_line(tmp_path):

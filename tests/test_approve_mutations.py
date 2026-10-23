@@ -40,7 +40,7 @@ MUTATIONS = {
                                '    return assess(detail)["tier"] != "routine" and diff_has_more(detail)',
                                "    return False"),
     "agent words before the diff": ("src/synthe_approve.py",
-                                    "    # The agent's words come last: read the change first, then what the agent says about it.\n",
+                                    "    # The task's words come last: read the change first, then what the task says. Its heading says who wrote it,\n",
                                     "    lines.insert(4, \" The agent says (moved up)\")\n"
                                     "    lines.insert(5, \"   \" + clean((detail.get(\"agent_says\") or {}).get(\"purpose\")))\n"),
     "card hides the commit the check asks for": ("src/synthe_approve.py",
