@@ -261,3 +261,12 @@ def test_mutation_removing_commit_check_is_detected(case):
     assert result.returncode == 0, result.stdout + result.stderr
     with pytest.raises(AssertionError):
         assert_mismatch_stops_before_dependencies(case, result)
+
+
+def test_reused_checkout_passes_with_an_insteadof_rewrite(case):
+    # Many developers rewrite https://github.com/ to ssh; `remote get-url` reported the rewritten URL and
+    # the installer refused its own checkout on a rerun (found 2026-10-23).
+    case.seed()
+    config = case.tmp / 'gitconfig-rewrite'
+    config.write_text('[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')
+    assert_success(case, case.run(GIT_CONFIG_GLOBAL=str(config)))

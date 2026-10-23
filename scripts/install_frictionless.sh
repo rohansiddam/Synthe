@@ -56,7 +56,9 @@ if [ -e "$SYNTHE_SRC" ] || [ -L "$SYNTHE_SRC" ]; then
         || move_aside "the directory is not a Git checkout"
     [ "$SOURCE_ROOT" = "$(cd "$SYNTHE_SRC" && pwd -P)" ] \
         || move_aside "the directory is inside a different checkout"
-    SOURCE_REMOTE=$(synthe_git -C "$SYNTHE_SRC" remote get-url origin 2>/dev/null) \
+    # The URL as configured: `remote get-url` applies url.*.insteadOf rewrites (often https -> ssh),
+    # which made a rerun refuse a correct checkout.
+    SOURCE_REMOTE=$(synthe_git -C "$SYNTHE_SRC" config --get remote.origin.url 2>/dev/null) \
         || move_aside "origin is missing"
     [ "$SOURCE_REMOTE" = "$SYNTHE_REPO" ] || [ "$SOURCE_REMOTE" = "$SYNTHE_REPO.git" ] \
         || move_aside "origin is not the public Synthe repository"
