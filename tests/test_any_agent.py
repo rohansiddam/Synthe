@@ -184,3 +184,19 @@ def test_apply_linux_clients_fails_closed_before_writing(tmp_path, clients):
             si.apply_config(state, stage)
         assert json.loads((state / "broker.json").read_text()) == config
         assert not (state / "registry.json").exists()
+
+
+def test_linux_publishes_only_the_broker_public_key(tmp_path):
+    # Run only the publication stanza's Python, never the privileged installer around it.
+    text = (ROOT / "deploy/linux/finish.sh").read_text()
+    stanza = text.split("# Publish the broker's public key", 1)[1]
+    code = stanza.split("<<'PYEOF'\n", 1)[1].split("\nPYEOF\n", 1)[0]
+    assert 'chown root:root "$SHARED/broker.pub.json"' in stanza and 'chmod 644 "$SHARED/broker.pub.json"' in stanza
+    assert text.index("# Publish the broker's public key") > text.index('synthe_init.py" apply-config')
+    registry = {"agents": {"synthe-broker": {"keys": [{"kid": "synthe-broker-1", "alg": "Ed25519",
+                                                       "public_key": "PUB", "private_key": "MUST-NOT-LEAK"}]}}}
+    (tmp_path / "registry.json").write_text(json.dumps(registry))
+    out = tmp_path / "broker.pub.json"
+    subprocess.run([sys.executable, "-", str(tmp_path / "registry.json"), str(out)], input=code, text=True, check=True)
+    assert json.loads(out.read_text()) == {"broker": "synthe-broker", "kid": "synthe-broker-1", "alg": "Ed25519",
+                                           "public_key": "PUB"}

@@ -287,3 +287,11 @@ def test_the_swift_helper_requires_touch_id_with_todays_fingerprints_and_never_o
     assert "kSecAttrAccessibleWhenUnlockedThisDeviceOnly" in swift
     assert "O_CREAT | O_EXCL" in swift
     assert ".deviceOwnerAuthenticationWithBiometrics" in swift
+
+
+def test_enrollment_off_macos_points_to_the_passphrase(tmp_path, monkeypatch):
+    monkeypatch.setattr(st.sys, "platform", "linux")
+    monkeypatch.setattr(st.shutil, "which", lambda name: pytest.fail("no compiler is looked up off macOS"))
+    with pytest.raises(st.TouchIDError, match=r"synthe-approve --passphrase"):
+        st.build_helper(tmp_path, ROOT)
+    assert not st.helper_path(tmp_path).exists()
