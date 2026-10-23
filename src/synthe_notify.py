@@ -249,6 +249,39 @@ MESSAGES = {
                                     "Only your signature can revoke a grant."),
     "template_store_corrupt": ("problem", "Synthe cannot read its record of lane grants",
                                "It refuses to act on a record it cannot trust."),
+    # --- who may give the agent work (v0.7: trusted senders, and tasks the agent starts under a lane)
+    "sender_not_trusted": ("stop", "someone outside the people you trust tried to give the agent a task",
+                           "Only the senders your policy lists may give this agent work."),
+    "sender_ceiling_missing": ("problem", "this agent takes tasks from any registered key, not only yours",
+                               "List who may give it work (trusted_senders in its policy)."),
+    "issuer_requires_grant": ("stop", "Synthe's task issuer key signed a task that no lane covers",
+                              "The issuer only signs tasks under a lane you signed, so it was refused."),
+    "issuer_invalid": ("stop", "a task claimed to be issued by Synthe, but not by its task issuer",
+                       "Only the broker's own issuer key may issue tasks under a lane."),
+    "self_issue_grant_invalid": ("stop", "a task the agent started carried a lane you did not sign",
+                                 "A task the agent starts must sit inside a lane you signed."),
+    "self_issue_not_granted": ("retry", "the agent tried to start its own work where no lane lets it",
+                               "Give it a task, or sign a lane that allows it (synthe-task grant --self-issue)."),
+    "self_issue_scope": ("stop", "the agent tried to start work outside its lane",
+                         "Work it starts itself is limited to the lane's branches and files."),
+    "self_issue_ttl": ("stop", "a task the agent started asked to stay open longer than its lane allows",
+                       "It was refused."),
+    "self_issued_approval_present": ("stop", "a task the agent started carried its own approval",
+                                     "The agent never approves its own work."),
+    "self_issue_unknown": ("stop", "a task Synthe has no record of issuing was presented as one it issued",
+                           "Only tasks Synthe itself issued count."),
+    "self_issue_purpose_invalid": ("retry", "the agent described its task with hidden characters or too much text",
+                                   "A task's description must be one plain line; it can say it again."),
+    "self_issue_exhausted": ("problem", "the agent has started every task your lane allows",
+                             "It needs a new lane, or a task from you."),
+    "self_issue_open_limit": ("retry", "the agent has as many open tasks as your lane allows",
+                              "It can start another when one finishes."),
+    "self_issue_rate_limited": ("retry", "the agent started tasks faster than your lane allows",
+                                "It can try again later."),
+    "self_issue_request_conflict": ("retry", "the agent reused a task request for different work",
+                                    "Nothing was issued."),
+    "self_issue_unreviewed": ("problem", "a lane that lets the agent start its own work would let high-risk pushes go alone",
+                              "Such a lane must send high-risk pushes to you, or name a reviewer."),
     "registry_unreadable": ("problem", "Synthe could not read its list of trusted agents and keys",
                             "It refuses to act without it."),
     "registry_malformed": ("problem", "Synthe's list of trusted agents and keys is malformed",
@@ -487,7 +520,7 @@ WAIT_WORDS = {"approval": "your approval", "escalated": "your decision (a review
 HUMAN_WAITS = {"approval", "escalated"}   # what in `staged.waiting_for` means a person
 QUIET_WAITS = {"review", "dependency"}    # waits Synthe resolves without you
 REFUSALS = ("denied", "errored", "unconfirmed", "approval_rejected", "delegate_approval_rejected",
-            "escalation_rejected")
+            "escalation_rejected", "task_issue_refused")
 QUIET_SUFFIXES = ("_accepted", "_granted", "_revoked", "_issued")   # what a person did, or what settled
 
 
@@ -973,6 +1006,13 @@ def review_text(r: dict) -> str:
     return "; ".join(_strings(risk.get("reasons"), 80)[:3]) or "review-level push"
 
 
+def self_issued(r: dict) -> bool:
+    """Whether a receipt is about a task the agent started itself under a lane (v0.7): its signed `task_origin`,
+    which the broker derives from the signed packet, never from the task's text."""
+    o = r.get("task_origin")
+    return isinstance(o, dict) and o.get("kind") == "self_issued"
+
+
 def build_digest(receipts: list, days: int = 7, now: dt.datetime | None = None) -> dict:
     """Counts and one line per stop, from receipts that already verified."""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -1009,7 +1049,19 @@ def build_digest(receipts: list, days: int = 7, now: dt.datetime | None = None) 
         if kind and e["id"] not in needed:
             lane_review.append({"seq": e["seq"], "time": e["time"], "branch": e["branch"], "kind": kind,
                                 "text": review_text(r)})
+    # tasks the agent started itself under a lane (v0.7), and which of them shipped
+    purposes = {r.get("seq"): r.get("agent_says", {}).get("purpose") if isinstance(r.get("agent_says"), dict) else None
+                for r, e, t in events if r.get("kind") == "task_issue" and r.get("decision") == "task_issued"}
+    started = [r for r, e, t in inside if r.get("kind") == "task_issue" and r.get("decision") == "task_issued"]
+    own = []
+    for r, e in shipped:
+        if self_issued(r):
+            o = r["task_origin"]
+            own.append({"seq": e["seq"], "time": e["time"], "branch": e["branch"],
+                        "lane": clean(o.get("template_id"), 60), "asked": e["id"] in needed,
+                        "purpose": clean(purposes.get(o.get("issue_receipt_seq")) or "", 120)})
     return {"days": days, "since": since.isoformat(), "until": now.isoformat(),
+            "self_issued_started": len(started), "self_issued_shipped": len(own), "self_issued_items": own,
             "lane_review": len(lane_review), "lane_review_kinds": dict(Counter(x["kind"] for x in lane_review)),
             "lane_review_items": lane_review,
             "pushes_shipped": len(shipped), "shipped_without_asking": sum(1 for r, e in shipped if e["id"] not in needed),
@@ -1028,7 +1080,8 @@ def render_digest(d: dict, chain: dict) -> str:
     n = d["days"]
     period = "Today" if n == 1 else f"Last {n} days"
     lines = []
-    if not (d["pushes_shipped"] or d["needed_you"] or d["stopped"] or d["problems"] or d["routine_refusals"]):
+    if not (d["pushes_shipped"] or d["needed_you"] or d["stopped"] or d["problems"] or d["routine_refusals"]
+            or d.get("self_issued_started")):
         lines.append(f"{period}: nothing to report. No pushes, nothing stopped.")
     else:
         bits = [f"{_plural(d['shipped_without_asking'], 'push', 'pushes')} shipped without asking you",
@@ -1060,6 +1113,19 @@ def render_digest(d: dict, chain: dict) -> str:
             lines.append(f"  ... and {len(d['lane_review_items']) - LIST_LIMIT} more")
         lines.append("  Your lane lets these through; it reads paths and sizes, not code. "
                      "synthe-task grant --auto-approve routine would make them ask you.")
+    if d.get("self_issued_started") or d.get("self_issued_shipped"):
+        lines += ["", f"The agent started {_plural(d['self_issued_started'], 'task')} of its own under your lane"
+                      f"{'s' if len({i['lane'] for i in d['self_issued_items']}) > 1 else ''}; "
+                      f"{_plural(d['self_issued_shipped'], 'push', 'pushes')} from such tasks shipped:"]
+        for it in d["self_issued_items"][:LIST_LIMIT]:
+            when = parse_time(it["time"])
+            stamp = when.astimezone().strftime("%b %d %H:%M") if when else "?"
+            said = f"'{it['purpose']}'" if it["purpose"] else "(no description)"
+            lines.append(f"  {stamp}  {it['branch'] or 'a push'}: {said}{' (after you approved it)' if it['asked'] else ''}")
+        if len(d["self_issued_items"]) > LIST_LIMIT:
+            lines.append(f"  ... and {len(d['self_issued_items']) - LIST_LIMIT} more")
+        lines.append("  The descriptions are the agent's own words, not yours. Close the lane any time: "
+                     "synthe-task revoke-grant.")
     for title, items in (("Stopped", d["stops"]), ("Needed a look", d["problem_items"])):
         if items:
             lines += ["", f"{title}:"]
