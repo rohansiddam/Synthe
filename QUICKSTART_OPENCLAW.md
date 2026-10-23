@@ -136,6 +136,7 @@ If the level isn't ENFORCED, stop here: the failing check says what's wrong.
 How hands-off?
   [1] Ask me before every push
   [2] Agents push without asking; Synthe only interrupts for what it blocks or flags as high-risk (recommended)
+      With [2] the agent can also start its own work in the lane: a plain git push needs no task from you.
 ```
 
 Press Return for `[2]`. Before anything is signed it shows the lane in plain words, roughly:
@@ -146,6 +147,9 @@ Press Return for `[2]`. Before anything is signed it shows the lane in plain wor
 > still ask you. The risk check reads paths and sizes, not code. Review-level changes (dependency
 > manifests and lockfiles, Dockerfiles, build scripts, ...) go out without asking you
 > (synthe-notify digest lists them afterwards); --auto-approve routine makes them ask too.
+> The agent may also start its own work in the lane: a plain git push on these branches with no task
+> from you gets a task Synthe issues under this grant, labelled as written by the agent. There is no
+> limit on how many. Revoking the grant stops them.
 > ...
 > With no limit and no expiry this is a standing permission: it stays open until you close it.
 
@@ -196,22 +200,27 @@ plugin doesn't run, and only the missing credentials stop a push.
 
 Leave this window open. It's the agent's window.
 
-## 7. Give OpenClaw work (your account)
+## 7. Give OpenClaw work
 
-Open a **new** Terminal window (⌘N). It runs as you, not as `openclaw`.
+**With the lane (`[2]`)** you don't sign each task. In the agent's window from step 6, just ask:
+
+> Add a greeting to the app and test it, on branch agent/first-push.
+
+OpenClaw starts a task of its own inside your lane (`synthe_start_task`): Synthe issues it under the
+lane you signed, labelled as written by the agent, and receipts it. Then OpenClaw commits on
+`agent/first-push` and proposes the push through Synthe. It can't push by itself. (An agent that only
+knows `git push` gets the same from a plain push in its clone: [`docs/GIT_PUSH.md`](docs/GIT_PUSH.md).)
+
+**With `[1]`, or for work outside the lane,** sign a task yourself. Open a **new** Terminal window (⌘N);
+it runs as you, not as `openclaw`:
 
 ```bash
 cd ~/synthe && ~/synthe-venv/bin/synthe-task new "Add a greeting and test it" --branch agent/first-push
 ```
 
-Type your approval passphrase. Today each piece of work still starts with a task you sign (its
-purpose and its branch); the lane decides which of its pushes go out without asking you.
-
-**You should see:** a `PASS` line for `signed with your key` and `agent/first-push`, then a **Tell OpenClaw**
-paragraph. Copy that paragraph and paste it into the agent's window from step 6.
-
-OpenClaw checks the task, commits on `agent/first-push` and proposes the push through Synthe. It
-can't push by itself.
+Type your approval passphrase. **You should see:** a `PASS` line for `signed with your key` and
+`agent/first-push`, then a **Tell OpenClaw** paragraph. Copy that paragraph and paste it into the
+agent's window. OpenClaw checks the task, commits and proposes the push through Synthe.
 
 ## 8. Let it go out, or approve it when Synthe asks
 
@@ -281,7 +290,8 @@ It checks the receipt chain against the broker's key first, then says, in plain 
 pushes went out without asking you, how many needed you and why, and which risky attempts were
 stopped. It also lists the review-level pushes that went out under your lane, for example "3
 dependency or build changes went out under your lane without asking you", so you can look at them
-afterwards. `--days 30` looks further back.
+afterwards, and the tasks the agent started itself under your lane, with which of them shipped (their
+descriptions are the agent's own words). `--days 30` looks further back.
 
 ## Next
 
@@ -296,6 +306,8 @@ afterwards. `--days 30` looks further back.
   - `--auto-approve routine`: dependency manifests and lockfiles, Dockerfiles, build scripts, any
     deletion and larger diffs ask you too; only routine pushes go out alone.
   - `--uses 50 --until 7d`: a ceiling. With neither, there is no limit and no expiry.
+  - `--self-issue`: the agent may start its own work in the lane (the setup lane has it). Without it,
+    every piece of work starts with a task you sign.
   - also `--branch`, `--paths`, `--remote`, `--agent`, `--delegate` (a model reviewer instead of you),
     `--brief`.
 

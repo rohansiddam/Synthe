@@ -36,13 +36,11 @@ Baseline before this work: 1648 passed, those 23 failed.
 
 ## Still to do
 
-### A. Integration: DONE except the quickstart
-- DONE: escalation notifications, grants with `auto_approve` and omitted limits, `synthe-approver grant`,
-  approval card wording, digest of review-tier pushes, `synthe-notify install-agent`, the setup offer and
-  installer launchers.
-- Quickstart (`QUICKSTART_OPENCLAW.md`) rewritten around install → lane + notifications → work → only hear
-  from Synthe when it matters: a rewrite was in progress in the main checkout (uncommitted) when B landed.
-  Finish it there, and mention that a plain `git push` needs no task once the lane is open.
+### A. Integration: DONE
+- Escalation notifications, grants with `auto_approve` and omitted limits, `synthe-approver grant`, approval
+  card wording, digest of review-tier pushes, `synthe-notify install-agent`, the setup offer and installer
+  launchers, and the quickstart rewritten around install → lane + notifications → work → only hear from
+  Synthe when it matters (with self-issue: no task to sign inside the lane).
 
 ### B. Self-issued tasks: DONE
 Built from `docs/handoff/self-issue-wip.patch` (applied, then fixed and finished). The design doc's Status
