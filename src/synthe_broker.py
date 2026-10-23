@@ -256,19 +256,26 @@ class Broker:
         packet = args.get("packet")
         h = packet.get("handoff") if isinstance(packet, dict) else None
         extra, defer = (), None
-        if isinstance(h, dict) and "issued_under_grant" in h:
-            # v0.7: a self-issued task claims only while its grant is live and the broker issued exactly it.
-            import synthe_lane_templates as lanes
-            try:
-                lanes.check_issued(self.cfg, registry, h)
-            except cm.Deny as d:
-                return hc._reject(d.reason["state"], d.reason["code"], d.reason["message"])
         if isinstance(h, dict):
             extra = cm.load_approvals(self.cfg, h)
             if args.get("wait_for_approval") is True:
                 # Work ahead: an approval this broker checks at commit may still be missing.
                 defer = {a.get("name") for a in h.get("planned_actions") or []
                          if isinstance(a, dict) and a.get("tool") in self.cfg.effects}
+        if isinstance(h, dict) and "issued_under_grant" in h:
+            # v0.7: a self-issued task claims only while its grant is live and the broker issued exactly it.
+            # The checker judges the bytes first (signature, the embedded grant, scope), so an edited or forged
+            # packet is refused for what it is, and only a genuine one is looked up in the broker's own state.
+            pre = hc.check(packet, registry=registry, ledger_path=self.cfg.ledger_path, workspace=self.cfg.workspace,
+                           dry_run=True, verify_evidence=self.cfg.verify_evidence, extra_approvals=extra,
+                           defer_approvals=defer, as_receiver=self.cfg.receiver_id)
+            if not isinstance(pre, dict) or pre.get("decision") != "ACCEPT":
+                return pre
+            import synthe_lane_templates as lanes
+            try:
+                lanes.check_issued(self.cfg, registry, h)
+            except cm.Deny as d:
+                return hc._reject(d.reason["state"], d.reason["code"], d.reason["message"])
         verdict = hc.check(packet, registry=registry, ledger_path=self.cfg.ledger_path,
                            workspace=self.cfg.workspace, dry_run=bool(args.get("dry_run", False)),
                            verify_evidence=self.cfg.verify_evidence, extra_approvals=extra,

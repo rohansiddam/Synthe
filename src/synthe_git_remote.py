@@ -248,10 +248,13 @@ def issue_task(client: scl.BrokerClient, branch: str, purpose: str) -> tuple[dic
         req_path.unlink(missing_ok=True)   # nothing was issued: the next push asks afresh
         reasons = [r for r in (out or {}).get("reasons") or [] if isinstance(r, dict)]
         code = reasons[0].get("code", "task_issue_refused") if reasons else "task_issue_refused"
+        ask = (f"Ask the approver for a task (synthe-task new \"...\" --branch {branch}), or for a lane that lets "
+               f"you start your own work there (synthe-task grant --self-issue)")
+        if code == "self_issue_not_granted":   # the ordinary case: no lane lets the agent start work here
+            raise scl.BrokerError("no_task_for_branch", f"no signed task plans a push of {branch}, and no lane "
+                                                        f"lets you start your own work there. {ask}")
         raise scl.BrokerError(code, f"no signed task for {branch}, and Synthe would not issue one: "
-                                    f"{reasons[0].get('message') if reasons else 'no reason given'}. Ask the "
-                                    f"approver for a task (synthe-task new \"...\" --branch {branch}) or a lane "
-                                    f"grant that lets you start your own work")
+                                    f"{reasons[0].get('message') if reasons else 'no reason given'}. {ask}")
     _write_private(_branch_file("tasks", branch), {"branch": branch, "packet": out["packet"]})
     req_path.unlink(missing_ok=True)
     return out["packet"], out
