@@ -2334,6 +2334,17 @@ def release(packet, ledger_path: Path | None, reserve_ttl_hours: float = 24.0,
         if not isinstance(entry, dict) or entry_state(entry) != "RESERVED":
             return _reject("invalid", "release_not_reserved",
                            f"idempotency_key '{key}' has no RESERVED claim to release")
+        # A claim with any recorded effect (EXECUTED or outcome-unknown) is not
+        # a bare reservation: releasing it would let the next epoch's holder
+        # re-run fenced_effect() for the same action, because check() writes a
+        # fresh entry on re-claim and the effect records go with the old epoch.
+        # Refuse, --force included; reconcile the effect receipts instead.
+        acted = sorted(a for a, r in (entry.get("effects") or {}).items() if isinstance(r, dict))
+        if acted:
+            return _reject("unknown", "release_effect_unreconciled",
+                           f"claim on '{key}' has recorded effects ({', '.join(acted)}); releasing it "
+                           f"would re-run them under the next epoch. Reconcile the effect receipts "
+                           f"(complete, or record the outcome) instead of releasing")
         claimed = parse_ts(entry.get("reserved_at") or entry.get("accepted_at") or "")
         if claimed is not None and claimed.tzinfo is None:
             claimed = claimed.replace(tzinfo=dt.timezone.utc)
