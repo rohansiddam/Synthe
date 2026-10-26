@@ -63,3 +63,22 @@ def test_every_attack_is_refused_and_the_control_goes_through(world, tmp_path):
                  "verify the chain independently with the published broker key",
                  "rewrite a denial as 'executed' in a copy", "reuse the finished task"):
         assert must in passed, (must, report["rows"])
+
+
+def test_linux_defaults_follow_the_linux_install(monkeypatch):
+    import importlib
+    monkeypatch.setattr(sys, "platform", "linux")
+    try:
+        linux = importlib.reload(rt)
+        assert linux.SOCKET == "unix:///run/synthe/broker.sock"
+        assert linux.INBOX == Path("/var/lib/synthe-shared/inbox")
+        assert linux.PUBLISHED_KEY == Path("/var/lib/synthe-shared/broker.pub.json")
+        assert linux.STATE == Path("/var/lib/synthe") and linux.MCP == "/opt/synthe/bin/synthe-mcp"
+        finish = (ROOT / "deploy/linux/finish.sh").read_text()
+        assert '"$SHARED/broker.pub.json"' in finish and "SHARED=/var/lib/synthe-shared" in finish
+        assert 'install -d -o "$APPROVER" -m 755 "$SHARED/inbox"' in finish
+    finally:
+        monkeypatch.undo()
+        importlib.reload(rt)
+    assert rt.SOCKET == ("unix:///run/synthe/broker.sock" if sys.platform == "linux"
+                         else "unix:///var/db/synthe-run/broker.sock")

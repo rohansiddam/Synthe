@@ -10,6 +10,10 @@ Three steps, two accounts (docs/REDTEAM.md has the walkthrough):
        runs every attack, pauses twice for you to use synthe-approve, then checks GitHub and the receipts.
   3. read the table it prints (also saved to /Users/Shared/synthe-redteam-report.json).
 
+On Linux (deploy/linux/finish.sh) the defaults follow that install instead: the socket
+/run/synthe/broker.sock, the inbox and published key under /var/lib/synthe-shared, the broker state
+/var/lib/synthe, /opt/synthe/bin/synthe-mcp, and the report in the agent's home.
+
 Each check says what is attacked, what Synthe must do, and what happened. A FAIL is a finding.
 """
 from __future__ import annotations
@@ -25,7 +29,8 @@ import tempfile
 from pathlib import Path
 
 # the repo this script sits in (you), else the installed copy (the agent's account)
-for _src in (os.environ.get("SYNTHE_SRC"), str(Path(__file__).resolve().parents[1] / "src"), "/Library/Synthe/src"):
+for _src in (os.environ.get("SYNTHE_SRC"), str(Path(__file__).resolve().parents[1] / "src"), "/Library/Synthe/src",
+             "/opt/synthe/src"):
     if _src and (Path(_src) / "synthe_commit.py").exists():
         sys.path.insert(0, _src)
         break
@@ -34,12 +39,23 @@ import synthe_commit as cm  # noqa: E402
 import synthe_crypto as sc  # noqa: E402
 import synthe_sign as ss  # noqa: E402
 
-SOCKET = "unix:///var/db/synthe-run/broker.sock"
-INBOX = Path("/Users/Shared/Synthe/inbox")
+if sys.platform == "linux":  # deploy/linux/finish.sh
+    SOCKET = "unix:///run/synthe/broker.sock"
+    INBOX = Path("/var/lib/synthe-shared/inbox")
+    REPORT = Path.home() / "synthe-redteam-report.json"  # the shared folder is root's; the agent's home isn't
+    PUBLISHED_KEY = Path("/var/lib/synthe-shared/broker.pub.json")  # written by finish.sh, root-owned
+    STATE = Path("/var/lib/synthe")
+    MCP = "/opt/synthe/bin/synthe-mcp"
+    APPROVE = f"SYNTHE_BROKER={SOCKET} ~/synthe-venv/bin/synthe-approve"
+else:
+    SOCKET = "unix:///var/db/synthe-run/broker.sock"
+    INBOX = Path("/Users/Shared/Synthe/inbox")
+    REPORT = Path("/Users/Shared/synthe-redteam-report.json")
+    PUBLISHED_KEY = Path("/Users/Shared/Synthe/broker.pub.json")  # written by add-agent-user.sh, root-owned
+    STATE = Path("/var/db/synthe")
+    MCP = "/Library/Synthe/venv/bin/synthe-mcp"
+    APPROVE = f"cd ~/Documents/Synthe-work/synthe-openclaw && SYNTHE_BROKER={SOCKET} venv/bin/synthe-approve"
 INDEX = "redteam-tasks.json"
-REPORT = Path("/Users/Shared/synthe-redteam-report.json")
-PUBLISHED_KEY = Path("/Users/Shared/Synthe/broker.pub.json")  # written by add-agent-user.sh, root-owned
-APPROVE = f"cd ~/Documents/Synthe-work/synthe-openclaw && SYNTHE_BROKER={SOCKET} venv/bin/synthe-approve"
 BRANCHES = {"main": "agent/redteam", "swap": "agent/redteam-swap", "rewrite": "agent/hello3"}
 
 
@@ -61,8 +77,9 @@ def cmd_tasks(a) -> int:
     inbox.mkdir(parents=True, exist_ok=True)
     (inbox / INDEX).write_text(json.dumps(index, indent=2) + "\n")
     os.chmod(inbox / INDEX, 0o644)
-    print(f"\nTasks ready. In the agent's account (su - openclaw), run:\n"
-          f"  /Library/Synthe/venv/bin/python /Users/Shared/Synthe/redteam_live.py attack")
+    where = "/opt/synthe/venv/bin/python /var/lib/synthe-shared/redteam_live.py" if sys.platform == "linux" else \
+        "/Library/Synthe/venv/bin/python /Users/Shared/Synthe/redteam_live.py"
+    print(f"\nTasks ready. In the agent's account (su - openclaw), run:\n  {where} attack")
     return 0
 
 
@@ -186,8 +203,8 @@ def wall_checks(rep, ag, approver_home):
     rep.add(L, "git push straight to GitHub", "fail: the agent's account holds no GitHub credential",
             r.returncode != 0 and after == tip_before,
             f"exit {r.returncode}; {(r.stderr.strip().splitlines() or [''])[-1][:90]}; branch on GitHub: {after or 'absent'}")
-    for what, path in (("read the broker's GitHub token", "/var/db/synthe/github.token"),
-                       ("read the broker's signing key", "/var/db/synthe/keys/synthe-broker.key.json"),
+    for what, path in (("read the broker's GitHub token", STATE / "github.token"),
+                       ("read the broker's signing key", STATE / "keys/synthe-broker.key.json"),
                        ("read the approver's key", f"{approver_home}/.synthe/approver.key.json" if approver_home else None)):
         if path is None:
             rep.add(L, what, "Permission denied", None, "skipped: pass --approver-home")
@@ -357,7 +374,7 @@ def cmd_attack(a, *, human=None) -> int:
     interactive = human is None
     index = json.loads((Path(a.inbox) / INDEX).read_text())
     packets = {k: json.loads(Path(v).read_text()) for k, v in index.items()}
-    mcp_cmd = a.mcp or ["/Library/Synthe/venv/bin/synthe-mcp", "--broker-url", a.broker, "--as-receiver", a.receiver]
+    mcp_cmd = a.mcp or [MCP, "--broker-url", a.broker, "--as-receiver", a.receiver]
     ag = Agent(a.broker, mcp_cmd, a.repo, a.remote)
     rep = Report()
     start_seq = ag.call("receipts", limit=1).get("count", 0)
@@ -497,7 +514,7 @@ def main(argv=None) -> int:
     t.add_argument("--inbox", default=str(INBOX))
     k = sub.add_parser("attack", help="(the agent) run every attack and check the results")
     k.add_argument("--broker", default=SOCKET)
-    k.add_argument("--broker-pub", help="the broker's public key (default: /Users/Shared/Synthe/broker.pub.json)")
+    k.add_argument("--broker-pub", help=f"the broker's public key (default: {PUBLISHED_KEY})")
     k.add_argument("--repo", default="~/synthe-test")
     k.add_argument("--remote", default="https://github.com/rohansiddam/synthe-test.git")
     k.add_argument("--receiver", default="openclaw")

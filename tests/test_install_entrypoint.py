@@ -41,8 +41,14 @@ if kind == 'pip':
 '''
 
 
+AS_ROOT = os.geteuid() == 0
+
+
 @pytest.fixture
 def case(tmp_path):
+    if AS_ROOT:  # e.g. a Linux container running the suite as root
+        pytest.skip('the installer refuses root by design; these cases need an ordinary user '
+                    '(test_installer_refuses_root covers root)')
     home = tmp_path / "home space's $literal"
     home.mkdir()
     commands = tmp_path / 'bin'
@@ -261,3 +267,13 @@ def test_mutation_removing_commit_check_is_detected(case):
     assert result.returncode == 0, result.stdout + result.stderr
     with pytest.raises(AssertionError):
         assert_mismatch_stops_before_dependencies(case, result)
+
+
+@pytest.mark.skipif(not AS_ROOT, reason='needs root: checks the refusal an ordinary user never reaches')
+def test_installer_refuses_root(tmp_path):
+    result = subprocess.run(['/bin/bash', str(INSTALLER)], input='', capture_output=True, text=True,
+                            timeout=30, cwd=tmp_path,
+                            env={'HOME': str(tmp_path), 'PATH': f'{tmp_path}/no-commands:/usr/bin:/bin'})
+    assert result.returncode == 1
+    assert 'should not be run as root' in result.stdout
+    assert not (tmp_path / '.synthe-source').exists() and not (tmp_path / '.synthe').exists()

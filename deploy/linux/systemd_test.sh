@@ -5,12 +5,16 @@
 # and an agent user pushing through /run/synthe/broker.sock. Throwaway keys only.
 #
 #   deploy/linux/systemd_test.sh        (needs docker; runs a --privileged container)
+#
+# Optional: SYNTHE_TEST_IMAGE names a prebuilt image with the same packages and skips the build (for
+# hosts that can't reach deb.debian.org); SYNTHE_TEST_DOCKER_ARGS adds `docker run` arguments, e.g.
+# --network host behind a host-local proxy.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-IMAGE=synthe-systemd-test:bookworm
+IMAGE=${SYNTHE_TEST_IMAGE:-synthe-systemd-test:bookworm}
 NAME=synthe-systemd-$(date +%s)
 
-docker build -q -t "$IMAGE" - >/dev/null <<'EOF'
+[ -n "${SYNTHE_TEST_IMAGE:-}" ] || docker build -q -t "$IMAGE" - >/dev/null <<'EOF'
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends systemd systemd-sysv python3 python3-venv git ca-certificates procps \
@@ -18,7 +22,8 @@ RUN apt-get update \
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 EOF
-docker run -d --name "$NAME" --privileged --tmpfs /run --tmpfs /run/lock -v "$PWD":/repo:ro "$IMAGE" >/dev/null
+# shellcheck disable=SC2086
+docker run -d ${SYNTHE_TEST_DOCKER_ARGS:-} --name "$NAME" --privileged --tmpfs /run --tmpfs /run/lock -v "$PWD":/repo:ro "$IMAGE" >/dev/null
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 
 docker exec -i "$NAME" bash -s <<'INNER'

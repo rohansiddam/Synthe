@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 KEY_NAME = "approver.touchid.json"
@@ -46,6 +47,9 @@ def build_helper(home: Path, source_root: Path) -> Path:
     src = Path(source_root) / SOURCE
     if not src.is_file():
         raise TouchIDError(f"{src} is missing: run this from a Synthe checkout")
+    if sys.platform != "darwin":
+        raise TouchIDError("Touch ID needs a Mac's Secure Enclave; on this system, approve with the passphrase "
+                           "(synthe-approve --passphrase)")
     swiftc = shutil.which("swiftc")
     if not swiftc:
         raise TouchIDError("swiftc wasn't found: install the Xcode command-line tools (xcode-select --install)")

@@ -33,6 +33,16 @@ chmod 600 "$STATE/registry.json" "$STATE/broker.json"
 install -d -m 755 "$SHARED"
 install -d -o synthe -g synthe -m 755 "$SHARED/workspace"
 install -d -o "$APPROVER" -m 755 "$SHARED/inbox"
+# Publish the broker's public key (root-owned, world-readable) so anyone can verify its receipts.
+"$BPY" - "$STATE/registry.json" "$SHARED/broker.pub.json" <<'PYEOF'
+import json, sys
+reg = json.load(open(sys.argv[1]))
+pub = {"broker": "synthe-broker", **reg["agents"]["synthe-broker"]["keys"][0]}
+pub = {k: pub[k] for k in ("broker", "kid", "alg", "public_key")}
+open(sys.argv[2], "w").write(json.dumps(pub, indent=2) + "\n")
+PYEOF
+chown root:root "$SHARED/broker.pub.json"
+chmod 644 "$SHARED/broker.pub.json"
 install -d -m 755 "$APP/bin" "$APP/integrations"
 cp -R "$HERE/integrations/openclaw" "$APP/integrations/"
 chmod -R go-w "$APP/integrations"
