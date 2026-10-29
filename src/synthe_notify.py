@@ -368,6 +368,8 @@ MESSAGES = {
                                    "Completions must match the task that started."),
     "release_not_reserved": ("retry", "a request tried to release a claim that is not held", "Nothing to release."),
     "release_claim_fresh": ("retry", "a request tried to release a claim that is still fresh", "It was refused."),
+    "release_effect_unreconciled": ("problem", "a request tried to release a claim whose push already ran or may have",
+                                    "Releasing it could run the push twice. Reconcile its receipts instead."),
     "replay_receipt_unverified": ("problem", "Synthe's receipts did not verify when it re-checked a finished push",
                                   "It will not repeat or replay the push until that is looked at."),
     "replay_receipt_mismatch": ("problem", "a finished push does not match its stored receipt",
