@@ -45,9 +45,12 @@ echo "--- the world: the person's key and setup, registry, config, a stand-in Gi
 mkdir -p /srv/git
 "$PY" /repo/scripts/redteam_world.py --src /opt/synthe/src --remote-url /srv/git/remote.git > /tmp/world.json
 chown synthe:synthe /srv/git
-# --shared=0644: the broker's unit runs with a private umask; git then keeps what it pushes readable, so the
-# agent can still fetch (a real GitHub remote needs nothing like this).
-as synthe git init -q --bare --shared=0644 -b main /srv/git/remote.git
+as synthe git init -q --bare -b main /srv/git/remote.git
+# The broker's unit runs with UMask=0077, so what it pushes here would be unreadable to the agent, which reads this
+# stand-in remote as it would read GitHub. A post-receive hook (run as synthe) opens it for reading again. Not
+# `git init --shared`: that sets setgid on new directories, which the unit's RestrictSUIDSGID=yes refuses.
+as synthe sh -c 'printf "#!/bin/sh\nchmod -R a+rX . 2>/dev/null\nexit 0\n" > /srv/git/remote.git/hooks/post-receive &&
+  chmod 755 /srv/git/remote.git/hooks/post-receive'
 seed=$(as synthe mktemp -d)
 as synthe sh -c 'cd "$1" && git init -q -b main && mkdir src && echo "print(1)" > src/app.py && git add -A &&
   git -c user.name=seed -c user.email=seed@x.invalid commit -qm init && git push -q /srv/git/remote.git HEAD:main &&
@@ -87,6 +90,16 @@ kill "$HUMAN" 2>/dev/null || true
 echo "--- the person's process"
 sed 's/^/  /' /tmp/human.log
 cp /tmp/redteam-report.json /out/redteam-report.json 2>/dev/null || true
+if [ "$CODE" -ne 0 ]; then
+  echo "--- the broker's last receipts (seq, decision, branch, reason codes)"
+  python3 - /var/lib/synthe/receipts.jsonl <<'PYEOF' | sed 's/^/  /'
+import json, sys
+for line in open(sys.argv[1]).read().splitlines()[-25:]:
+    r = json.loads(line)
+    print(r.get("seq"), r.get("kind") or "effect", r.get("decision"), (r.get("effect") or {}).get("branch") or "",
+          [(x.get("code"), str(x.get("message", ""))[:160]) for x in r.get("reasons") or []])
+PYEOF
+fi
 echo "--- broker journal (last lines)"
 journalctl -u synthe-broker --no-pager -o cat | grep -v '^$' | tail -6 | sed 's/^/  /'
 [ "$CODE" -eq 0 ] && echo "RED TEAM PASS" || { echo "RED TEAM FAIL (exit $CODE)"; exit 1; }

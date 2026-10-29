@@ -419,7 +419,7 @@ def self_issue_checks(rep, ag, human, interactive, registry=None):
     rep.add(L, "SI-16 a self-issued routine push (control)", "issued, claimed, pushed exactly that commit, receipted",
             r.get("decision") == "executed" and tip == c and (r.get("task_origin") or {}).get("kind") == "self_issued"
             and start.get("receipt", {}).get("decision") == "task_issued",
-            f"issue #{start.get('receipt', {}).get('seq')} {r.get('decision')} #{r.get('seq')}; "
+            f"issue #{start.get('receipt', {}).get('seq')} {r.get('decision')} #{r.get('seq')} {_codes(r)}; "
             f"GitHub {br('control')}: {(tip or 'absent')[:12]}")
 
     r = issue(br("x"), template_id="redteam-no-such-lane")
@@ -625,7 +625,7 @@ def human_loop(pipe, client, key, poll=0.2, timeout=3600):
                     detail = kept.get("swap") if act == "approve_swap" else client.call("staged_detail", id=sid)
                     res = client.call("submit_approval", approval=sa.build_approval(detail, key))
                     out = {"ok": True, "decision": (res.get("receipt") or {}).get("decision"),
-                           "commits": [c.get("decision") for c in res.get("commits") or []]}
+                           "commits": [(c.get("decision"), _codes(c)) for c in res.get("commits") or []]}
                 elif act == "revoke":
                     out = client.call("revoke_lane_template", revocation=lanes.sign({"template_id": SI_LANE}, key,
                                                                                     revoke=True))
