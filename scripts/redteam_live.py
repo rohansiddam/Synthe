@@ -748,6 +748,10 @@ def cmd_attack(a, *, human=None) -> int:
 
         print("\nReceipts")
         receipts_check(rep, ag, start_seq, a.broker_pub)
+    except Exception as e:  # noqa: BLE001  (the battery broke: still write the report, with this as a FAIL)
+        import traceback
+        traceback.print_exc()
+        rep.add("harness", "the battery runs to the end", "no crash", False, f"{type(e).__name__}: {str(e)[:300]}")
     finally:
         ag.close()
         if human and human.get("stop"):

@@ -45,7 +45,9 @@ echo "--- the world: the person's key and setup, registry, config, a stand-in Gi
 mkdir -p /srv/git
 "$PY" /repo/scripts/redteam_world.py --src /opt/synthe/src --remote-url /srv/git/remote.git > /tmp/world.json
 chown synthe:synthe /srv/git
-as synthe git init -q --bare -b main /srv/git/remote.git
+# --shared=0644: the broker's unit runs with a private umask; git then keeps what it pushes readable, so the
+# agent can still fetch (a real GitHub remote needs nothing like this).
+as synthe git init -q --bare --shared=0644 -b main /srv/git/remote.git
 seed=$(as synthe mktemp -d)
 as synthe sh -c 'cd "$1" && git init -q -b main && mkdir src && echo "print(1)" > src/app.py && git add -A &&
   git -c user.name=seed -c user.email=seed@x.invalid commit -qm init && git push -q /srv/git/remote.git HEAD:main &&
