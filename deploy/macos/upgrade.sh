@@ -60,10 +60,11 @@ sudo -u _synthe env HOME="$STATE" "$BPY" "$APP/src/synthe_commit.py" init --dir 
 chown _synthe:_synthe "$STATE/registry.json"
 chmod 600 "$STATE/registry.json"
 
-# 4. v0.7: name the task issuer in broker.json. Lanes signed before this go stale: sign them again.
+# 4. v0.7: lane grants on for an install from before them (as a fresh setup has it; nothing is granted until
+#    you sign a lane), and the task issuer named in broker.json. Lanes signed before go stale: sign them again.
 SELF_ISSUE=$("$BPY" "$APP/src/synthe_init.py" enable-self-issue --state "$STATE")
 case "$SELF_ISSUE" in *'"changed": true'*)
-  echo "Self-issued tasks are on. Lanes signed before this upgrade are now stale: sign them again (synthe-task grant)." ;;
+  echo "Lanes and self-issued tasks are on. Lanes signed before this upgrade are now stale: sign them again (synthe-task grant)." ;;
 esac
 chown _synthe:_synthe "$STATE/broker.json"
 chmod 600 "$STATE/broker.json"

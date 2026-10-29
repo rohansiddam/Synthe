@@ -296,8 +296,13 @@ def test_an_upgrade_turns_self_issue_on_once_the_issuer_key_exists(tmp_path):
     assert cfg == {"lane_templates": {"receivers": ["openclaw"], "self_issue": si.self_issue_config()}, "x": 1}
     assert oct((state / "broker.json").stat().st_mode & 0o777) == "0o600"
     assert si.enable_self_issue(state)["changed"] is False                             # once only
-    (state / "broker.json").write_text(json.dumps({"x": 1}))                            # lane grants off: left off
+    (state / "broker.json").write_text(json.dumps({"x": 1}))                            # no receiver: left alone
     assert si.enable_self_issue(state)["self_issue"] is False and json.loads((state / "broker.json").read_text()) == {"x": 1}
+    # an install from before lane grants: lanes on for its receiver (no grant exists until a person signs one)
+    (state / "broker.json").write_text(json.dumps({"receiver": "openclaw"}))
+    assert si.enable_self_issue(state) == {"self_issue": True, "changed": True}
+    assert json.loads((state / "broker.json").read_text())["lane_templates"] == {
+        "receivers": ["openclaw"], "self_issue": si.self_issue_config()}
 
 
 def test_the_swift_helper_requires_touch_id_with_todays_fingerprints_and_never_overwrites_a_key():

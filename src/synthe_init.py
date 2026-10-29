@@ -617,13 +617,16 @@ def apply_registry(state: Path, stage: Path) -> dict:
 
 
 def enable_self_issue(state: Path) -> dict:
-    """Run as root by deploy/macos/upgrade.sh (v0.7): an install from before self-issued tasks gets them once
-    `synthe_commit.py init` has made the task issuer key. Names the issuer in broker.json's lane_templates (as
-    a fresh setup does); nothing else changes. That is part of every grant's lineage, so lanes signed before
-    it go stale and are signed again. Without the key, or with lane grants off, it does nothing."""
+    """Run as root by deploy/macos/upgrade.sh (v0.7): bring an older install's broker.json to what a fresh setup
+    writes. An install from before lane grants gets `lane_templates: {"receivers": [<its receiver>]}` (that
+    authorizes nothing: a lane exists only once a person signs one), and, once `synthe_commit.py init` has made
+    the task issuer key, the issuer is named there. The issuer is part of every grant's lineage, so lanes signed
+    before go stale and are signed again. A config without a receiver, or without the key, is left as it is."""
     cfg_path, key = state / "broker.json", state / "keys" / f"{ISSUER_ID}.key.json"
     cfg = json.loads(cfg_path.read_text())
     lt = cfg.get("lane_templates")
+    if lt is None and isinstance(cfg.get("receiver"), str) and cfg["receiver"]:
+        lt = cfg["lane_templates"] = {"receivers": [cfg["receiver"]]}
     if not key.exists() or not isinstance(lt, dict):
         return {"self_issue": False, "changed": False}
     if lt.get("self_issue") == self_issue_config():
