@@ -616,6 +616,23 @@ def apply_registry(state: Path, stage: Path) -> dict:
                               if a.get("kind") == "human"}}
 
 
+def enable_self_issue(state: Path) -> dict:
+    """Run as root by deploy/macos/upgrade.sh (v0.7): an install from before self-issued tasks gets them once
+    `synthe_commit.py init` has made the task issuer key. Names the issuer in broker.json's lane_templates (as
+    a fresh setup does); nothing else changes. That is part of every grant's lineage, so lanes signed before
+    it go stale and are signed again. Without the key, or with lane grants off, it does nothing."""
+    cfg_path, key = state / "broker.json", state / "keys" / f"{ISSUER_ID}.key.json"
+    cfg = json.loads(cfg_path.read_text())
+    lt = cfg.get("lane_templates")
+    if not key.exists() or not isinstance(lt, dict):
+        return {"self_issue": False, "changed": False}
+    if lt.get("self_issue") == self_issue_config():
+        return {"self_issue": True, "changed": False}
+    lt["self_issue"] = self_issue_config()
+    _write_private(cfg_path, json.dumps(cfg, indent=2) + "\n")
+    return {"self_issue": True, "changed": True}
+
+
 def add_approval_key(registry_path: Path, entry: dict) -> str:
     """Append an approval key (e.g. Touch ID's ES256 key) to the one human approver's entry. Returns the
     approver's id. The existing keys stay: the passphrase key is the fallback."""
@@ -1054,6 +1071,8 @@ def main(argv=None) -> int:
     r = sub.add_parser("apply-registry", help=argparse.SUPPRESS)  # run by deploy/macos/upgrade.sh, as root
     r.add_argument("--state", required=True)
     r.add_argument("--stage", required=True)
+    es = sub.add_parser("enable-self-issue", help=argparse.SUPPRESS)  # run by deploy/macos/upgrade.sh, as root
+    es.add_argument("--state", required=True)
     c = sub.add_parser("apply-config", help=argparse.SUPPRESS)  # run by enforce-macos.sh, as root
     c.add_argument("--state", required=True)
     c.add_argument("--stage", required=True)
@@ -1066,6 +1085,9 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "apply-config":  # runs as root with no --home and no OpenClaw
         print(json.dumps(apply_config(Path(a.state), Path(a.stage)), indent=2))
+        return 0
+    if a.cmd == "enable-self-issue":  # runs as root with no --home and no OpenClaw
+        print(json.dumps(enable_self_issue(Path(a.state)), indent=2))
         return 0
     if a.cmd == "apply-registry":  # runs as root with no --home and no OpenClaw
         print(json.dumps(apply_registry(Path(a.state), Path(a.stage)), indent=2))

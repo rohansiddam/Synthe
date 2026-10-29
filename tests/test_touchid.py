@@ -279,6 +279,25 @@ def test_the_upgrade_script_runs_from_root_writes_every_launcher_and_holds_no_se
     assert text.index("\ncd /") < text.index("sudo -u _synthe")
     assert "git-remote-synthe" in text and "apply-registry" in text
     assert "github.token" not in text and "private_key" not in text
+    # v0.7: the issuer key is made as _synthe, before the registry registers it and the config names it
+    assert text.index('sudo -u _synthe env HOME="$STATE" "$BPY" "$APP/src/synthe_commit.py" init') \
+        < text.index("apply-registry") < text.index("enable-self-issue")
+    assert text.index("enable-self-issue") < text.index('chown _synthe:_synthe "$STATE/broker.json"')
+
+
+def test_an_upgrade_turns_self_issue_on_once_the_issuer_key_exists(tmp_path):
+    state = tmp_path / "state"
+    (state / "keys").mkdir(parents=True)
+    (state / "broker.json").write_text(json.dumps({"lane_templates": {"receivers": ["openclaw"]}, "x": 1}))
+    assert si.enable_self_issue(state) == {"self_issue": False, "changed": False}       # no key yet: nothing
+    (state / "keys" / f"{si.ISSUER_ID}.key.json").write_text("{}")
+    assert si.enable_self_issue(state) == {"self_issue": True, "changed": True}
+    cfg = json.loads((state / "broker.json").read_text())
+    assert cfg == {"lane_templates": {"receivers": ["openclaw"], "self_issue": si.self_issue_config()}, "x": 1}
+    assert oct((state / "broker.json").stat().st_mode & 0o777) == "0o600"
+    assert si.enable_self_issue(state)["changed"] is False                             # once only
+    (state / "broker.json").write_text(json.dumps({"x": 1}))                            # lane grants off: left off
+    assert si.enable_self_issue(state)["self_issue"] is False and json.loads((state / "broker.json").read_text()) == {"x": 1}
 
 
 def test_the_swift_helper_requires_touch_id_with_todays_fingerprints_and_never_overwrites_a_key():

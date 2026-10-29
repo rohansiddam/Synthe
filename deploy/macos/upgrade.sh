@@ -5,9 +5,10 @@
 #   cd <your Synthe checkout> && git pull && sudo bash deploy/macos/upgrade.sh [--stage DIR]
 #
 # Copies the code into /Library/Synthe (root-owned), rewrites the launchers the agent's account uses,
-# installs the staged registry (for example a Touch ID approval key from `synthe-init touchid`), and
-# restarts the broker and, if setup installed it, the agent's OpenClaw gateway. The broker's key,
-# config, ledger and receipts stay as they are. Holds no secret.
+# installs the staged registry (for example a Touch ID approval key from `synthe-init touchid`), makes the
+# task issuer key if the install predates it (v0.7) and names it in the config, and restarts the broker
+# and, if setup installed it, the agent's OpenClaw gateway. The broker's key, ledger and receipts stay as
+# they are. Holds no secret.
 set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "macOS only" >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo "run it with sudo: sudo bash $0" >&2; exit 2; }
@@ -50,12 +51,24 @@ for f in "$APP"/venv/bin/synthe-init "$APP"/venv/bin/synthe-mcp "$APP"/venv/bin/
   chown root:wheel "$f"; chmod 755 "$f"
 done
 
-# 2. the staged registry (approval keys); the broker's own entry comes from its key file
+# 2. v0.7: the task issuer key, made as _synthe like the broker key (kept if it exists), so the broker can
+#    issue tasks under a lane that allows self-issue. Its own key file never leaves /var/db/synthe.
+sudo -u _synthe env HOME="$STATE" "$BPY" "$APP/src/synthe_commit.py" init --dir "$STATE" >/dev/null
+
+# 3. the staged registry (approval keys); the broker's and the task issuer's entries come from their key files
 "$BPY" "$APP/src/synthe_init.py" apply-registry --state "$STATE" --stage "$STAGE"
 chown _synthe:_synthe "$STATE/registry.json"
 chmod 600 "$STATE/registry.json"
 
-# 3. restart what runs the new code, then check the broker
+# 4. v0.7: name the task issuer in broker.json. Lanes signed before this go stale: sign them again.
+SELF_ISSUE=$("$BPY" "$APP/src/synthe_init.py" enable-self-issue --state "$STATE")
+case "$SELF_ISSUE" in *'"changed": true'*)
+  echo "Self-issued tasks are on. Lanes signed before this upgrade are now stale: sign them again (synthe-task grant)." ;;
+esac
+chown _synthe:_synthe "$STATE/broker.json"
+chmod 600 "$STATE/broker.json"
+
+# 5. restart what runs the new code, then check the broker
 launchctl kickstart -k system/com.synthe.broker
 if launchctl print system/com.synthe.openclaw-gateway >/dev/null 2>&1; then
   launchctl kickstart -k system/com.synthe.openclaw-gateway
