@@ -1,0 +1,47 @@
+# The live red team, unattended, on every pull request and push to main or a claude/** branch:
+# scripts/redteam_live.py against a real install under systemd (deploy/linux/redteam_test.sh), with the
+# broker, the agent and the person as three separate OS users and throwaway keys. The person's steps are
+# done by a process running as the person, so nobody has to be at a keyboard. The report is an artifact.
+# Also runs deploy/linux/systemd_test.sh (install.sh and the hardened unit).
+#
+# Not covered here: the macOS install (launchd, _synthe, the agent's own macOS account). docs/REDTEAM.md
+# has the manual run for that.
+name: Red team
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'claude/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redteam-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  redteam:
+    name: Red team (Linux, separate users, systemd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run every attack against a real install
+        run: bash deploy/linux/redteam_test.sh redteam-out
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redteam-report
+          path: redteam-out/redteam-report.json
+          if-no-files-found: warn
+
+  systemd:
+    name: Install under systemd (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash deploy/linux/systemd_test.sh

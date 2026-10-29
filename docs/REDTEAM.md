@@ -54,6 +54,24 @@ live: each would cost a fresh lane.
 The rehearsal also checks the battery itself. With the path-scope check or the history-rewrite check
 removed from the broker, it reports FAIL.
 
+## Running it unattended (CI, every push)
+
+`.github/workflows/redteam.yml` runs the whole battery on every pull request and every push to `main` or a
+`claude/**` branch, with nobody at a keyboard: `deploy/linux/redteam_test.sh` installs the broker under
+systemd in a throwaway container (`install.sh`, the hardened unit), and the broker (`synthe`), the agent
+(`agent1`) and the person (`human`) are three separate OS users with throwaway keys. A local bare repository
+stands in for GitHub. The agent runs every attack, the OS-wall rows included; the person's three steps
+(approve the swap, approve the control push, revoke the red-team lane) are done by
+`redteam_live.py human`, running as `human` with the person's key, which answers the attack through a
+request/answer directory pair. The report is the run's `redteam-report` artifact. With Docker installed:
+
+```bash
+bash deploy/linux/redteam_test.sh redteam-out      # writes redteam-out/redteam-report.json
+```
+
+What it does not cover: the macOS install itself (launchd, `_synthe`, the agent's own macOS account, Touch
+ID) and a real GitHub remote. The manual run below covers those.
+
 ## Running it live (about 10 minutes, two Terminal windows)
 
 1. **Window A, you.** Sign the three red-team tasks and the `redteam-si` lane. The passphrase is asked
